@@ -2,14 +2,12 @@
 # macOS 内置 bash 是 3.2（不支持 ${var,,} 等 bash4 语法）
 # 本脚本已改写为兼容 bash 3.2 的写法，无需 Homebrew bash
 # =============================================================================
-#  Lancer1911 ASR Live — 安装脚本
+#  Lancer1911 ASR Offline — 安装脚本
 #  Install Script
 #
 #  用法 / Usage:
-#    bash install.sh          # 标准安装（仅必需依赖）
-#    bash install.sh --full   # 完整安装（含说话人识别 pyannote）
-#    bash install.sh --sensevoice  # 含 SenseVoice 引擎
-#    bash install.sh --full --sensevoice  # 全部
+#    bash install.sh          # 标准安装（含 resemblyzer 说话人识别）
+#    bash install.sh --no-diarize  # 跳过 resemblyzer（纯 MFCC 降级模式）
 # =============================================================================
 
 set -euo pipefail
@@ -25,25 +23,24 @@ error()   { echo -e "${RED}[ERROR]${NC} $*"; }
 section() { echo -e "\n${BOLD}━━━  $*  ━━━${NC}"; }
 
 # ── 参数解析 ─────────────────────────────────────────────────────────────────
-INSTALL_FULL=false
-INSTALL_SV=false
+INSTALL_DIARIZE=true
 for arg in "$@"; do
-    [[ "$arg" == "--full" ]]        && INSTALL_FULL=true
-    [[ "$arg" == "--sensevoice" ]]  && INSTALL_SV=true
+    [[ "$arg" == "--no-diarize" ]] && INSTALL_DIARIZE=false
 done
 
 # ── 脚本所在目录（即 app 根目录） ────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VENV_DIR="$HOME/asr-env"
+# launcher.py 按此顺序查找：~/asr-offline-env, ~/asr-env
+# 使用 asr-offline-env 以便与 ASR Live（如已安装）的环境隔离
+VENV_DIR="$HOME/asr-offline-env"
 PYTHON_MIN="3.11"
 
 echo ""
 echo -e "${BOLD}╔══════════════════════════════════════════╗${NC}"
-echo -e "${BOLD}║   Lancer1911 ASR Live — Installer        ║${NC}"
+echo -e "${BOLD}║  Lancer1911 ASR Offline — Installer      ║${NC}"
 echo -e "${BOLD}╚══════════════════════════════════════════╝${NC}"
 echo ""
-[[ "$INSTALL_FULL" == true ]] && info "Mode: full (including speaker diarization)"
-[[ "$INSTALL_SV"   == true ]] && info "Mode: SenseVoice engine included"
+[[ "$INSTALL_DIARIZE" == false ]] && info "Mode: skip resemblyzer (MFCC fallback for diarization)"
 echo ""
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -95,17 +92,24 @@ section "2 / 6  Homebrew & System Dependencies"
 if ! command -v brew &>/dev/null; then
     info "Homebrew not found — installing..."
     /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-    # Add brew to PATH for this session (Apple Silicon default path)
     eval "$(/opt/homebrew/bin/brew shellenv)" 2>/dev/null || true
 fi
 ok "Homebrew $(brew --version | head -1)"
 
-# ffmpeg (required for MP3 encoding)
+# ffmpeg — required for MP3/MP4/AAC → 16kHz f32le conversion
+# MP4 files contain AAC audio; ffmpeg decodes and resamples them.
+# Without ffmpeg the file picker will fail with "ffmpeg 转换失败".
 if ! command -v ffmpeg &>/dev/null; then
-    info "Installing ffmpeg..."
+    info "Installing ffmpeg (required for MP3/MP4 audio decoding)..."
     brew install ffmpeg
 fi
 ok "ffmpeg $(ffmpeg -version 2>&1 | head -1 | awk '{print $3}')"
+
+# Verify ffmpeg has AAC decoding support (the aac decoder must be present)
+if ! ffmpeg -decoders 2>/dev/null | grep -q " aac"; then
+    warn "ffmpeg is installed but the AAC decoder was not found."
+    warn "MP4 files may fail to load. Try: brew reinstall ffmpeg"
+fi
 
 # ═══════════════════════════════════════════════════════════════════════════════
 section "3 / 6  Python Environment"
@@ -132,7 +136,8 @@ if [[ -z "$PYTHON_BIN" ]]; then
     PYTHON_BIN="python3.11"
 fi
 
-# Create virtual environment
+# Create virtual environment at ~/asr-offline-env
+# (launcher.py searches this path first, before ~/asr-env)
 if [[ -d "$VENV_DIR" ]]; then
     warn "Virtual environment already exists at $VENV_DIR"
     read -r -p "Re-use existing environment? [Y/n] " ans
@@ -157,29 +162,50 @@ pip install --upgrade pip --quiet
 section "4 / 6  Python Packages"
 # ═══════════════════════════════════════════════════════════════════════════════
 
-info "Installing core packages (this may take 3–5 minutes)..."
-pip install --quiet \
-    "fastapi>=0.111.0" \
-    "uvicorn[standard]>=0.30.0" \
-    "pywebview>=5.1" \
-    "mlx-whisper>=0.4.0" \
-    "mlx-lm>=0.16.0" \
-    "silero-vad>=5.1.2" \
-    "sounddevice>=0.4.7" \
-    "numpy>=1.26.0" \
-    "onnxruntime"
-ok "Core packages installed"
+info "Installing core packages from requirements.txt (this may take 3–5 minutes)..."
 
-if [[ "$INSTALL_SV" == true ]]; then
-    info "Installing SenseVoice engine (mlx-audio)..."
-    pip install --quiet "mlx-audio>=0.4.3"
-    ok "mlx-audio installed"
+# Install directly from requirements.txt so the script stays in sync
+# with what the app actually depends on.
+REQS="$SCRIPT_DIR/requirements.txt"
+if [[ -f "$REQS" ]]; then
+    pip install --quiet -r "$REQS"
+    ok "Core packages installed (from requirements.txt)"
+else
+    # Fallback: explicit list matching requirements.txt as of v0.6n
+    pip install --quiet \
+        "fastapi>=0.111.0" \
+        "uvicorn[standard]>=0.30.0" \
+        "python-multipart>=0.0.9" \
+        "pywebview>=5.1" \
+        "mlx-whisper>=0.4.0" \
+        "mlx-lm>=0.16.0" \
+        "numpy>=1.26.0" \
+        "scipy>=1.11.0" \
+        "sounddevice>=0.4.7" \
+        "onnxruntime"
+    ok "Core packages installed (fallback list)"
 fi
 
-if [[ "$INSTALL_FULL" == true ]]; then
-    info "Installing speaker diarization packages (torch + pyannote — ~2 GB download)..."
-    pip install --quiet torch omegaconf "pyannote.audio>=3.3.0"
-    ok "Speaker diarization packages installed"
+# resemblyzer — optional but strongly recommended for speaker diarization.
+# Falls back to built-in MFCC automatically if not installed.
+# Note: resemblyzer depends on webrtcvad which requires a C compiler.
+# Xcode Command Line Tools (xcode-select --install) must be present.
+if [[ "$INSTALL_DIARIZE" == true ]]; then
+    info "Installing resemblyzer for speaker diarization..."
+    if ! xcode-select -p &>/dev/null; then
+        warn "Xcode Command Line Tools not found. resemblyzer requires them to compile webrtcvad."
+        warn "Install with: xcode-select --install  then re-run this script."
+        warn "Skipping resemblyzer — the app will use the built-in MFCC fallback."
+    else
+        pip install --quiet "resemblyzer>=0.1.1.dev0" || {
+            warn "resemblyzer installation failed."
+            warn "The app will use the built-in MFCC speaker embedding instead."
+            warn "You can retry later: pip install resemblyzer"
+        }
+        ok "resemblyzer installed"
+    fi
+else
+    info "Skipping resemblyzer (--no-diarize). Built-in MFCC will be used for speaker diarization."
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -188,7 +214,7 @@ section "5 / 6  Model Downloads"
 
 # huggingface_hub CLI
 if ! command -v hf &>/dev/null; then
-    pip install --quiet huggingface_hub[cli]
+    pip install --quiet "huggingface_hub[cli]"
 fi
 
 HF_CACHE="$HOME/.cache/huggingface/hub"
@@ -205,42 +231,25 @@ download_model() {
         info "Downloading $label ($size)..."
         info "  Tip: if slow, set HF_ENDPOINT=https://hf-mirror.com"
         hf download "$repo" || {
-            warn "Download failed for $repo. You can retry later from the app's model guide."
+            warn "Download failed for $repo."
+            warn "You can retry from the app Settings → Model Guide."
         }
     fi
 }
 
-# Required models
+# These are the default model IDs used by the app (server.py DEFAULT_SETTINGS).
+# If the user has already configured different models in Settings, these
+# downloads are still useful as the out-of-box defaults.
 download_model "mlx-community/whisper-large-v3-turbo" "Whisper large-v3-turbo (ASR)" "~3 GB"
 download_model "mlx-community/Qwen3-14B-4bit"         "Qwen3-14B-4bit (LLM)"        "~8 GB"
-
-# Optional: SenseVoice
-if [[ "$INSTALL_SV" == true ]]; then
-    download_model "mlx-community/SenseVoiceSmall" "SenseVoiceSmall (alternative ASR)" "~0.5 GB"
-fi
-
-# Optional: speaker diarization
-if [[ "$INSTALL_FULL" == true ]]; then
-    info "Speaker diarization models require a HuggingFace account and model agreement."
-    info "Steps:"
-    info "  1. Visit https://huggingface.co/settings/tokens and create a Read token"
-    info "  2. Visit https://huggingface.co/pyannote/embedding and agree to terms"
-    info "  3. Visit https://huggingface.co/pyannote/segmentation-3.0 and agree to terms"
-    read -r -p "Have you completed the above steps? [y/N] " ans
-    if [[ "$(echo "$ans" | tr "[:upper:]" "[:lower:]")" == "y" ]]; then
-        hf auth login
-        download_model "pyannote/embedding"        "pyannote embedding"        "~0.3 GB"
-        download_model "pyannote/segmentation-3.0" "pyannote segmentation-3.0" "~0.2 GB"
-    else
-        warn "Skipping speaker diarization models. You can install them later via Settings → Check Speaker ID Setup."
-    fi
-fi
 
 # ═══════════════════════════════════════════════════════════════════════════════
 section "6 / 6  Launcher"
 # ═══════════════════════════════════════════════════════════════════════════════
 
-LAUNCHER="$HOME/Desktop/ASR Live.command"
+# The .app uses launcher.py to find an external Python environment.
+# This .command file is only needed when running from source (not .app).
+LAUNCHER="$HOME/Desktop/ASR Offline.command"
 cat > "$LAUNCHER" << LAUNCH
 #!/bin/bash
 source "$VENV_DIR/bin/activate"
@@ -248,7 +257,7 @@ cd "$SCRIPT_DIR"
 python main.py
 LAUNCH
 chmod +x "$LAUNCHER"
-ok "Launcher created: ~/Desktop/ASR Live.command"
+ok "Launcher created: ~/Desktop/ASR Offline.command"
 
 # ── 完成 ──────────────────────────────────────────────────────────────────────
 echo ""
@@ -256,13 +265,15 @@ echo -e "${GREEN}${BOLD}╔═════════════════�
 echo -e "${GREEN}${BOLD}║   Installation complete ✓                ║${NC}"
 echo -e "${GREEN}${BOLD}╚══════════════════════════════════════════╝${NC}"
 echo ""
-echo -e "  Start the app:   ${BOLD}double-click  ~/Desktop/ASR Live.command${NC}"
-echo -e "  Or from terminal: ${BOLD}source $VENV_DIR/bin/activate && python $SCRIPT_DIR/main.py${NC}"
+echo -e "  If running from source:"
+echo -e "    Double-click: ${BOLD}~/Desktop/ASR Offline.command${NC}"
+echo -e "    Or:           ${BOLD}source $VENV_DIR/bin/activate && python $SCRIPT_DIR/main.py${NC}"
 echo ""
-if [[ "$INSTALL_FULL" == false ]]; then
-    echo -e "  Speaker diarization not installed. Run with ${BOLD}--full${NC} to add it."
-fi
-if [[ "$INSTALL_SV" == false ]]; then
-    echo -e "  SenseVoice not installed. Run with ${BOLD}--sensevoice${NC} to add it."
+echo -e "  If running the .app:"
+echo -e "    Just open ${BOLD}Lancer1911 ASR Offline.app${NC} — it will find $VENV_DIR automatically."
+echo ""
+if [[ "$INSTALL_DIARIZE" == false ]]; then
+    echo -e "  Speaker diarization: using built-in MFCC (resemblyzer skipped)."
+    echo -e "  To add resemblyzer later: ${BOLD}source $VENV_DIR/bin/activate && pip install resemblyzer${NC}"
 fi
 echo ""
