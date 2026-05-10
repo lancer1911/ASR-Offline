@@ -294,7 +294,16 @@ function handleLlmDone(m) {
   if (!m.diarize_running) {
     setPhase(4);
     updateProgress(100, trMsg(m.msg || `完成（${entries.length} 条）`));
-    sciFinishThen(() => showReview(entries));
+    let reviewShown = false;
+    const showOnce = () => {
+      if (reviewShown) return;
+      reviewShown = true;
+      showReview(entries);
+    };
+    sciFinishThen(showOnce);
+    // Safety net: if the sci-fi fade timer is interrupted by late translation
+    // events or pywebview timing, still force the review/playback UI to appear.
+    setTimeout(showOnce, 1500);
   }
 }
 
@@ -768,6 +777,7 @@ function resetUpload() {
 // ── Review ────────────────────────────────────────────────────
 async function showReview(entries) {
   _entries = entries;
+  sciHideNow();   // 确保进入校对阶段时科幻面板立即隐藏，不残留
   document.getElementById('DROP_OUTER').style.display = 'none';
   document.getElementById('PROG').classList.remove('visible');
   document.getElementById('BTN_NEW').style.display = '';
@@ -782,24 +792,184 @@ async function showReview(entries) {
   if (entries.some(e => e.speaker)) updateSpeakerPanel(entries);
   if (!_audioLoaded) {
     try {
-      const r = await fetch('/api/audio');
-      if (r.ok) {
-        const buf = await r.arrayBuffer();
-        initPlayer(new Uint8Array(buf));
-      }
+      // 用 HEAD 请求检查 /api/audio 是否可用，再挂载 URL（无需下载整个文件）
+      const r = await fetch('/api/audio', { method: 'HEAD' });
+      if (r.ok) initPlayer(null);
     } catch(e) {}
   }
+}
+
+
+// ── Subtitle search / filter ─────────────────────────────────
+function subtitleSearchMode() {
+  return document.getElementById('SUB_SEARCH_MODE')?.value || 'text';
+}
+function subtitleSearchQuery() {
+  const mode = subtitleSearchMode();
+  if (mode === 'speaker') return document.getElementById('SUB_SEARCH_SPEAKER')?.value || '';
+  return document.getElementById('SUB_SEARCH_INPUT')?.value || '';
+}
+function entrySearchBlob(e) {
+  const trans = e && e.translations ? Object.values(e.translations).join('\n') : '';
+  return [e?.corrected, e?.text, e?.asr_raw, trans, e?.language, e?.emotion, e?.speaker]
+    .filter(v => v !== undefined && v !== null).join('\n');
+}
+function regexEscape(s) {
+  return String(s || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+function hasSearchLogicOperators(q) {
+  // Logical operators are recognized only when surrounded by whitespace.
+  // Examples: "同志 AND 主义", "patent OR claim". Case-insensitive.
+  return /\s+(?:AND|OR)\s+/i.test(String(q || ''));
+}
+function splitRegexLogicExpression(q) {
+  // Keeps the original regex mode intact. If no AND/OR operator is present,
+  // the whole query is treated as a normal JavaScript regular expression.
+  q = String(q || '').trim();
+  if (!hasSearchLogicOperators(q)) {
+    const single = new RegExp(q, 'i');
+    const highlight = new RegExp(q, 'gi');
+    return {kind: 'single', single, highlight};
+  }
+
+  const parts = q.split(/\s+(AND|OR)\s+/i).map(x => String(x || '').trim()).filter(x => x !== '');
+  if (!parts.length || parts.length % 2 === 0) throw new Error('Invalid logical regex expression');
+
+  const groups = [[]];
+  const highlightTerms = [];
+  let pendingOp = null;
+  for (let i = 0; i < parts.length; i++) {
+    const part = parts[i];
+    if (i % 2 === 1) {
+      const op = part.toUpperCase();
+      if (op !== 'AND' && op !== 'OR') throw new Error('Invalid logical operator');
+      pendingOp = op;
+      continue;
+    }
+    if (!part) throw new Error('Empty regex term');
+    const termRe = new RegExp(part, 'i');
+    if (pendingOp === 'OR') groups.push([]);
+    groups[groups.length - 1].push(termRe);
+    highlightTerms.push(part);
+  }
+  if (!groups.length || groups.some(g => !g.length)) throw new Error('Invalid logical regex expression');
+
+  let highlight = null;
+  if (highlightTerms.length) {
+    highlight = new RegExp(highlightTerms.map(t => `(?:${t})`).join('|'), 'gi');
+  }
+  return {kind: 'logic', groups, highlight};
+}
+function currentSearchRegexForHighlight() {
+  const q = subtitleSearchQuery().trim();
+  const mode = subtitleSearchMode();
+  if (!q || mode === 'speaker') return null;
+  try {
+    if (mode === 'regex') return splitRegexLogicExpression(q).highlight;
+    return new RegExp(regexEscape(q), 'gi');
+  } catch(e) { return null; }
+}
+function highlightSearchText(text, re) {
+  text = String(text ?? '');
+  if (!re) return esc(text);
+  let out = '', last = 0, m, guard = 0;
+  try {
+    re.lastIndex = 0;
+    while ((m = re.exec(text)) && guard++ < 300) {
+      if (!m[0]) { re.lastIndex++; continue; }
+      out += esc(text.slice(last, m.index));
+      out += `<mark class="search-hit">${esc(m[0])}</mark>`;
+      last = m.index + m[0].length;
+    }
+    out += esc(text.slice(last));
+    return out;
+  } catch(e) { return esc(text); }
+}
+function filterSubtitleEntries(entries) {
+  entries = Array.isArray(entries) ? entries : [];
+  const q = subtitleSearchQuery().trim();
+  const mode = subtitleSearchMode();
+  const err = document.getElementById('SUB_SEARCH_ERR');
+  if (err) err.textContent = '';
+  if (!q) return entries.map((e, idx) => ({e, idx}));
+  if (mode === 'speaker') {
+    const needle = q.toLowerCase();
+    return entries.map((e, idx) => ({e, idx})).filter(x => String(x.e?.speaker || '').toLowerCase() === needle);
+  }
+  if (mode === 'regex') {
+    let parsed;
+    try { parsed = splitRegexLogicExpression(q); }
+    catch(e) {
+      if (err) err.textContent = tr('search.regex_error');
+      return [];
+    }
+    return entries.map((e, idx) => ({e, idx})).filter(x => {
+      const blob = entrySearchBlob(x.e);
+      if (parsed.kind === 'single') return parsed.single.test(blob);
+      // OR of AND-groups: "A AND B OR C" means (A && B) || C.
+      return parsed.groups.some(group => group.every(re => re.test(blob)));
+    });
+  }
+  const needle = q.toLowerCase();
+  return entries.map((e, idx) => ({e, idx})).filter(x => entrySearchBlob(x.e).toLowerCase().includes(needle));
+}
+function updateSubtitleSearchUI(total, shown) {
+  const bar = document.getElementById('SUB_SEARCH_BAR');
+  if (bar) bar.classList.toggle('visible', total > 0);
+  updateSubtitleSpeakerOptions();
+  const mode = subtitleSearchMode();
+  const input = document.getElementById('SUB_SEARCH_INPUT');
+  const spSel = document.getElementById('SUB_SEARCH_SPEAKER');
+  if (input) {
+    input.style.display = mode === 'speaker' ? 'none' : '';
+    input.placeholder = tr(mode === 'regex' ? 'search.placeholder_regex' : 'search.placeholder_text');
+  }
+  if (spSel) spSel.style.display = mode === 'speaker' ? '' : 'none';
+  const cnt = document.getElementById('SUB_SEARCH_COUNT');
+  if (cnt) cnt.textContent = total ? tr('search.count').replace('N', shown).replace('M', total) : '';
+}
+function updateSubtitleSpeakerOptions() {
+  const sel = document.getElementById('SUB_SEARCH_SPEAKER');
+  if (!sel) return;
+  const cur = sel.value;
+  const names = [];
+  (_speakerOrder || []).forEach(s => { if (s && !names.includes(s)) names.push(s); });
+  (_entries || []).forEach(e => { const s = e && e.speaker; if (s && !names.includes(s)) names.push(s); });
+  sel.innerHTML = names.length
+    ? names.map(s => `<option value="${esc(s)}">${esc(s)}</option>`).join('')
+    : `<option value="">${esc(tr('search.no_speaker'))}</option>`;
+  if (names.includes(cur)) sel.value = cur;
+}
+function onSubtitleSearchModeChanged() {
+  updateSubtitleSearchUI((_entries||[]).length, (_entries||[]).length);
+  renderEntries(_entries);
+}
+function onSubtitleSearchChanged() { renderEntries(_entries); }
+function clearSubtitleSearch() {
+  const modeSel = document.getElementById('SUB_SEARCH_MODE');
+  if (modeSel) modeSel.value = 'text';
+  const input = document.getElementById('SUB_SEARCH_INPUT');
+  if (input) input.value = '';
+  const err = document.getElementById('SUB_SEARCH_ERR');
+  if (err) err.textContent = '';
+  renderEntries(_entries);
 }
 
 function renderEntries(entries) {
   entries = Array.isArray(entries) ? entries : [];
   const wrap = document.getElementById('SUB_WRAP');
+  const filtered = filterSubtitleEntries(entries);
+  updateSubtitleSearchUI(entries.length, filtered.length);
   wrap.innerHTML = '';
   if (!entries.length) {
     wrap.innerHTML = `<div style="text-align:center;color:var(--hi);padding:40px">${tr('entry.no_content')}</div>`;
     return;
   }
-  entries.forEach((e, idx) => {
+  if (!filtered.length) {
+    wrap.innerHTML = `<div style="text-align:center;color:var(--hi);padding:40px">${tr('search.no_match')}</div>`;
+    return;
+  }
+  filtered.forEach(({e, idx}) => {
     const el = document.createElement('div');
     el.className = 'entry';
     el.dataset.idx = idx;
@@ -848,8 +1018,9 @@ function _entryHTML(e, idx) {
   const emo   = e.emotion  || '';
   const spk   = e.speaker  || '';
   const trans = e.translations || {};
+  const searchRe = currentSearchRegexForHighlight();
   const transHtml = Object.entries(trans).map(([l,t]) =>
-    `<div class="trans-line">${langTag(l)}${esc(t)}</div>`
+    `<div class="trans-line">${langTag(l)}${highlightSearchText(t, searchRe)}</div>`
   ).join('');
 
   const _micSvg = '<svg class="svg-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="pointer-events:none;margin-right:2px;flex-shrink:0"><rect x="9" y="2" width="6" height="11" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><line x1="12" y1="21" x2="12" y2="17"/><line x1="8" y1="21" x2="16" y2="21"/></svg>';
@@ -870,7 +1041,7 @@ function _entryHTML(e, idx) {
   const asrRawHtml = asrRaw
     ? `<div class="asr-raw-layer" id="asr-raw-${idx}">
         <div class="asr-raw-label">${tr('entry.asr_anchor_time')} ${esc(asrTs)} ${!tsMatch?'<span style=\"color:var(--red)\">'+tr('entry.asr_ts_mismatch')+'</span>':''}</div>
-        <div class="asr-raw-text">${esc(asrRaw)}</div>
+        <div class="asr-raw-text">${highlightSearchText(asrRaw, searchRe)}</div>
        </div>` : '';
 
   return `
@@ -881,7 +1052,7 @@ function _entryHTML(e, idx) {
       ${spkBadge}
       <span class="entry-num">#${idx+1}</span>
     </div>
-    <div class="entry-text" id="entry-text-${idx}">${esc(e.corrected||'')}</div>
+    <div class="entry-text" id="entry-text-${idx}">${highlightSearchText(e.corrected||'', searchRe)}</div>
     ${asrRawHtml}
     ${transHtml ? `<div class="entry-trans">${transHtml}</div>` : ''}
     <div class="entry-actions">
@@ -1295,6 +1466,12 @@ function applyTranslation(entry_id, trans, msg=null) {
   if (_retranslateVisualRunning || _translateAllRunning) _translateAllCompletedIds.add(eidNum);
   if (!_entries[entry_id]) { _updateTranslateProgress(); return; }
   _entries[entry_id].translations = trans || {};
+  // If automatic post-LLM translation arrives before the review cards have
+  // been rendered, do not leave the user stuck in the Phase II preview.
+  const subWrap = document.getElementById('SUB_WRAP');
+  if (!_retranslateVisualRunning && subWrap && !subWrap.classList.contains('visible') && Array.isArray(_entries) && _entries.length) {
+    sciFinishThen(() => showReview(_entries));
+  }
   // During full retranslation, mirror every backend translate_done event into the
   // sci-fi panel. This no longer depends on whether parsed translations are
   // non-empty, so JSON repair/fallback cases still visibly advance.
@@ -1742,6 +1919,7 @@ function updateSpeakerPanel(entries) {
   rememberSpeakerOrderFromEntries(entries, false);
   const speakers = (_speakerOrder || []).filter(spk => Object.prototype.hasOwnProperty.call(counts, spk));
   Object.keys(counts).forEach(spk => { if (!speakers.includes(spk)) speakers.push(spk); });
+  updateSubtitleSpeakerOptions();
   if (!speakers.length) { res.style.display = 'none'; return; }
 
   res.style.display = '';
@@ -1988,7 +2166,7 @@ async function saveSession() {
 
   const payload = {
     app:          'Lancer1911 ASR Offline',
-    version:      '0.5l',
+    version:      '0.6n',
     saved_at:     new Date().toISOString(),
     source_audio: sourceAudio,   // 原始音频文件的元信息
     settings:     _settings || {},
@@ -2038,12 +2216,8 @@ async function onAsoAudioSelected(input) {
     if (!r.ok) { console.warn('音频上传失败', r.status); return; }
     // pair_audio succeeded; audio is now available via /api/audio; entries remain unchanged
     if (!_audioLoaded) {
-      const ar = await fetch('/api/audio');
-      if (ar.ok) {
-        const buf = await ar.arrayBuffer();
-        initPlayer(new Uint8Array(buf));
-        updateProgress(100, tr('msg.audio_paired'));
-      }
+      initPlayer(null);
+      updateProgress(100, tr('msg.audio_paired'));
     }
   } catch(e) { console.warn('音频加载失败', e); }
 }
@@ -2283,23 +2457,25 @@ let _audioEl = null, _followMode = true, _seeking = false,
     _pendingAudioFilename = null;   // ASO 加载时记录的原始音频文件名
 
 function initPlayer(audioBytes) {
+  // audioBytes is accepted for backward compatibility but no longer used.
+  // Blob URLs for large audio files cause inaccurate seek / currentTime reporting
+  // in WKWebView (pywebview on macOS). We instead stream directly from /api/audio
+  // which supports HTTP Range requests, giving the browser sample-accurate seek.
+  if (_audioBlob) { URL.revokeObjectURL(_audioBlob); _audioBlob = null; }
   _audioEl = document.getElementById('AUDIO_EL');
-  const blob = new Blob([audioBytes], {type:'audio/wav'});
-  _audioBlob = URL.createObjectURL(blob);
-  _audioEl.src = _audioBlob;
+  _audioEl.src = '/api/audio?' + Date.now(); // cache-bust so re-upload works
   _audioEl.load();
   _audioLoaded = true;
-
   _audioEl.ontimeupdate = onTimeUpdate;
   _audioEl.onended = () => {
-    document.getElementById('PLAY_BTN').textContent = '▶';
+    document.getElementById('PLAY_BTN').textContent = '\u25B6';
   };
   _audioEl.onloadedmetadata = () => {
     document.getElementById('PLAY_TIME').textContent =
       '0:00 / ' + fmtTime(_audioEl.duration);
   };
   document.getElementById('PLAYER').classList.add('visible');
-  setVol(100); // 初始化圆点位置
+  setVol(100);
 }
 
 function togglePlay() {

@@ -1,5 +1,5 @@
 """
-Lancer1911 ASR Offline v0.5a — FastAPI 后端
+Lancer1911 ASR Offline v0.6n — FastAPI 后端
 四阶段流水线：文件检查 → Whisper ASR → LLM纠错 → 说话人识别 → 手工校对/翻译
 """
 import asyncio, json, os, re, time, hashlib, threading, tempfile, queue as _queue
@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, UploadFile, File
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -57,7 +57,7 @@ DEFAULT_SETTINGS = {
     "context_prompt":   "",
     "theme":            "dark",
     "diarize_enabled":  False,
-    "diarize_threshold": 0.05,    # 余弦距离阈值（0~1），越小越严格
+    "diarize_threshold": 0.35,    # 余弦距离阈值（0~1），越小越严格
     "diarize_auto":     True,     # LLM 完成后自动触发说话人识别
     "debug_output":     False,    # 是否将各阶段中间结果保存为 JSON 到 ~/Downloads
     # 高级参数：集中管理当前版本中 ASR / LLM 流程里原本写死的数值。
@@ -147,7 +147,7 @@ class ModelWorker:
     def __init__(self, whisper_repo, llm_repo):
         from model_worker import worker_main
         self.task_q   = Queue(maxsize=4)
-        self.result_q = Queue(maxsize=256)  # 足够容纳大量 translate_done 结果
+        self.result_q = Queue(maxsize=1024)  # 足够容纳大量 translate_done + job_progress 结果
         self._proc    = Process(
             target=worker_main,
             args=(self.task_q, self.result_q, whisper_repo, llm_repo),
@@ -287,7 +287,8 @@ def result_receiver():
                 "pct":   msg.get("pct", 50),
                 "msg":   msg.get("msg",""),
             }
-            for k in ("preview_stage", "preview_text", "preview_append", "preview_clear"):
+            for k in ("preview_stage", "preview_text", "preview_append", "preview_clear",
+                      "preview_replace_last"):
                 if k in msg:
                     payload[k] = msg.get(k)
             broadcast_sync(payload)
@@ -339,13 +340,17 @@ def result_receiver():
             G.job_entries = entries
             llm_ms = msg.get("llm_ms", 0)
 
-            # ── LLM done：翻译优先在 diarize 之前启动 ──────────────
-            # 第1步：立即触发翻译（并行，不阻塞后续流程）
-            _enqueue_auto_translate(entries)
-
-            # 第2步：自动触发说话人识别（若已启用）
+            # ── LLM done：先进入 review，再启动补翻译 ────────────────
+            # 之前补翻译 translate_started 可能先于 llm_done 到达前端；在某些
+            # pywebview/Chromium 时序下，科幻展示层会保持在 Phase II，导致
+            # 已完成的字幕卡片和 playback 没有及时切换出来。这里改为：
+            #   1) 若无需自动 diarization，立即把后端状态设为 review 并广播 llm_done；
+            #   2) 随后再排队缺失翻译。
+            # 这样 /api/status 轮询和 WebSocket 都能可靠触发 showReview()。
             if G.settings.get("diarize_enabled") and G.settings.get("diarize_auto", True) \
                and G.job_audio_path and entries:
+                # 做说话人识别时仍然先保持处理阶段；补翻译可以并行启动。
+                _enqueue_auto_translate(entries)
                 G.job_status = "diarize"
                 G.job_diarize_cache_key = G.job_audio_path  # 新录音，不复用缓存
                 broadcast_sync({
@@ -364,11 +369,11 @@ def result_receiver():
                     "task_id":    tid,
                     "audio_path": G.job_audio_path,
                     "entries":    list(entries),
-                    "threshold":  float(G.settings.get("diarize_threshold", 0.05)),
+                    "threshold":  float(G.settings.get("diarize_threshold", 0.35)),
                     "cache_key":  G.job_diarize_cache_key,
                 })
             else:
-                # 不做说话人识别，直接进入校对阶段
+                # 不做说话人识别，直接进入校对阶段；字幕卡片/playback 优先显示。
                 G.job_status = "review"
                 broadcast_sync({
                     "type":      "llm_done",
@@ -382,6 +387,8 @@ def result_receiver():
                     "error":     msg.get("error", ""),
                     "diarize_running": False,
                 })
+                # 补缺失语言翻译不应阻塞 review 界面显示。
+                _enqueue_auto_translate(entries)
 
         elif t == "diarize_done":
             entries = msg.get("entries", [])
@@ -390,7 +397,7 @@ def result_receiver():
             G.job_entries = entries
             G.job_status = "review"
             n_spk = msg.get("n_speakers", 0)
-            thr   = msg.get("threshold", G.settings.get("diarize_threshold", 0.05))
+            thr   = msg.get("threshold", G.settings.get("diarize_threshold", 0.35))
             err   = msg.get("error", "")
             if err:
                 print(f"[Diarize ERROR] {err}", flush=True)
@@ -1083,12 +1090,14 @@ def create_app() -> FastAPI:
         """返回当前已上传音频文件的元信息（文件名、时长、编码等），供 ASO 保存使用。"""
         return JSONResponse(_json_safe(G.job_file_info))
 
-    @app.get("/api/audio")
-    async def api_audio():
+    @app.api_route("/api/audio", methods=["GET", "HEAD"])
+    async def api_audio(request: Request):
         """返回当前 job 的可播放音频供前端播放器使用。
 
-        使用 WAV 而不是 MP3，避免 MP3 编码器延迟/填充导致字幕时间戳与
-        playback currentTime 出现系统性偏移。
+        同时支持 HEAD（前端检查可用性）和 GET（实际播放）。
+        显式添加 Accept-Ranges: bytes，确保 WKWebView / Safari 内核能通过
+        HTTP Range 请求精确 seek，避免大文件 Blob URL 的 currentTime 漂移问题。
+        WAV 生成命令去掉输出侧多余的 -ar/-ac，避免触发 swr resampler 引入额外延迟。
         """
         from fastapi.responses import FileResponse, Response
         if not G.job_audio_path or not Path(G.job_audio_path).exists():
@@ -1096,16 +1105,25 @@ def create_app() -> FastAPI:
         tmp_wav = G.job_audio_path + ".wav"
         if not Path(tmp_wav).exists():
             cmd = ["ffmpeg", "-y", "-f", "f32le", "-ar", "16000", "-ac", "1",
-                   "-i", G.job_audio_path, "-ar", "16000", "-ac", "1",
-                   "-c:a", "pcm_s16le", tmp_wav]
+                   "-i", G.job_audio_path,
+                   "-c:a", "pcm_s16le", tmp_wav]   # 无需再指定输出 -ar/-ac，与输入一致
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL)
             await proc.wait()
-        if Path(tmp_wav).exists():
-            return FileResponse(tmp_wav, media_type="audio/wav")
-        return Response(status_code=500)
+        if not Path(tmp_wav).exists():
+            return Response(status_code=500)
+        size = Path(tmp_wav).stat().st_size
+        common_headers = {
+            "Accept-Ranges": "bytes",
+            "Content-Length": str(size),
+        }
+        if request.method == "HEAD":
+            return Response(
+                headers={**common_headers, "Content-Type": "audio/wav"})
+        return FileResponse(tmp_wav, media_type="audio/wav",
+                            headers={"Accept-Ranges": "bytes"})
 
     @app.get("/api/status")
     def api_status():

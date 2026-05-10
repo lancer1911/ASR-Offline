@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Lancer1911 ASR Offline v0.5z</title>
+<title>Lancer1911 ASR Offline v0.6n</title>
 <style>
 /* ── CSS Variables ─────────────────────────────────────────── */
 :root{
@@ -264,6 +264,24 @@ input[type=file]{display:none}
 .lang-radio-dot{width:7px;height:7px;border-radius:50%;background:var(--lang-fg,var(--hi));
   box-shadow:0 0 0 1px var(--lang-bd,transparent);flex-shrink:0}
 
+
+/* ── Subtitle search / filter ───────────────────────────────── */
+.sub-search-bar{display:none;align-items:center;gap:7px;flex-wrap:wrap;
+  background:var(--bg2);border:0.5px solid var(--b1);border-radius:8px;
+  margin:0 0 10px 0;padding:8px 10px;color:var(--su)}
+.sub-search-bar.visible{display:flex}
+.sub-search-toggle{display:inline-flex;align-items:center;justify-content:center;padding:5px 8px;min-width:30px}
+.sub-search-toggle svg{width:15px;height:15px;display:block}
+.sub-search-toggle.active{border-color:var(--ac);color:var(--ac);background:var(--acd)}
+.sub-search-label{font-size:12px;color:var(--hi);font-family:ui-monospace,'SF Mono',Menlo,monospace}
+.sub-search-mode,.sub-search-input,.sub-search-speaker{background:var(--bg3);border:0.5px solid var(--b2);
+  color:var(--tx);border-radius:6px;padding:5px 8px;font-size:12px;outline:none}
+.sub-search-input{min-width:240px;flex:1;font-family:ui-monospace,'SF Mono',Menlo,monospace}
+.sub-search-input:focus,.sub-search-mode:focus,.sub-search-speaker:focus{border-color:var(--ac)}
+.sub-search-count{font-size:11px;color:var(--hi);font-family:ui-monospace,'SF Mono',Menlo,monospace;white-space:nowrap}
+.sub-search-error{font-size:11px;color:var(--red);font-family:ui-monospace,'SF Mono',Menlo,monospace;white-space:nowrap}
+.search-hit{background:rgba(232,160,32,.32);color:var(--tx-strong);border-radius:2px;padding:0 1px}
+
 /* ── Speaker badge ───────────────────────────────────────── */
 .spk-badge{display:inline-flex;align-items:center;gap:4px;
   font-size:11px;font-family:ui-monospace,'SF Mono',Menlo,monospace;
@@ -457,7 +475,7 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border:none;
         LANCER1911<em>/</em>ASR OFFLINE</a>
     </span>
     <span class="brand-sub">
-      <span style="font-size:10px;color:var(--ac);letter-spacing:.05em">v0.6a</span>
+      <span style="font-size:10px;color:var(--ac);letter-spacing:.05em">v0.6n</span>
       <span id="author-badge" title="" style="display:none;cursor:default;line-height:1">
         <svg width="11" height="13" viewBox="0 0 11 13" fill="none">
           <path d="M5.5 0.5L1 2.5V6C1 9 3 11.5 5.5 12.5C8 11.5 10 9 10 6V2.5L5.5 0.5Z"
@@ -613,6 +631,24 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border:none;
     <!-- Results -->
     <div class="sub-wrap" id="SUB_WRAP"></div>
 
+
+    <!-- Subtitle search / filter -->
+    <div class="sub-search-bar" id="SUB_SEARCH_BAR">
+      <span class="sub-search-label" data-i18n="search.label">搜索字幕</span>
+      <select class="sub-search-mode" id="SUB_SEARCH_MODE" onchange="onSubtitleSearchModeChanged()">
+        <option value="text" data-i18n="search.mode_text">关键词</option>
+        <option value="regex" data-i18n="search.mode_regex">正则</option>
+        <option value="speaker" data-i18n="search.mode_speaker">发言人</option>
+      </select>
+      <input class="sub-search-input" id="SUB_SEARCH_INPUT" type="text"
+             data-i18n-placeholder="search.placeholder_text" placeholder="输入关键词…"
+             oninput="onSubtitleSearchChanged()">
+      <select class="sub-search-speaker" id="SUB_SEARCH_SPEAKER" style="display:none" onchange="onSubtitleSearchChanged()"></select>
+      <button class="btn" onclick="clearSubtitleSearch()" data-i18n="search.clear">清除</button>
+      <span class="sub-search-count" id="SUB_SEARCH_COUNT"></span>
+      <span class="sub-search-error" id="SUB_SEARCH_ERR"></span>
+    </div>
+
     <!-- Export bar -->
     <div class="export-bar" id="EXPORT_BAR">
       <span style="font-size:12px;color:var(--hi)" data-i18n="export.label">导出：</span>
@@ -641,6 +677,12 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border:none;
           </div>
         </div>
       </div>
+      <button class="btn sub-search-toggle" id="BTN_SUB_SEARCH" onclick="toggleSubtitleSearchPanel()" data-i18n-title="search.toggle_title" title="搜索字幕" aria-label="Search subtitles">
+        <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <circle cx="10.8" cy="10.8" r="6.2" stroke="currentColor" stroke-width="2"/>
+          <path d="M15.6 15.6L21 21" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
+        </svg>
+      </button>
       <span style="flex:1"></span>
       <button class="btn" id="BTN_DEBUG" onclick="toggleDebugPanel()" data-i18n-title="export.btn_debug_title_open" title="展开调试面板" style="display:inline-flex;align-items:center;gap:5px;padding:5px 9px">
         <svg id="BUG_ICON_SVG" width="16" height="16" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
@@ -683,7 +725,7 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border:none;
             <circle cx="50" cy="50" r="44" fill="none" stroke="#cc2222" stroke-width="9"/>
             <line x1="18" y1="18" x2="82" y2="82" stroke="#cc2222" stroke-width="9" stroke-linecap="round"/>
           </svg>
-          <span data-i18n="dbg.title">调试面板 v0.5l</span></span>
+          <span data-i18n="dbg.title">调试面板 v0.6n</span></span>
         <span id="DBG_BACKEND" style="color:var(--hi)"></span>
         <button class="act-btn" onclick="showDebugRaw()" data-i18n="dbg.btn_raw">ASR 原始文字</button>
         <button class="act-btn" onclick="showDebugSegments()" data-i18n="dbg.btn_segments">ASR Segments</button>
@@ -807,7 +849,7 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border:none;
   </div>
 </div>
 
-<script src="/static/i18n.js?v=0.6g"></script>
+<script src="/static/i18n.js?v=0.6n"></script>
 <script>
 // ── Constants ─────────────────────────────────────────────────
 const LANGS = ["中文","英文","日文","韩文","法文","德文","西班牙文"];
@@ -887,6 +929,7 @@ let ws, _ready = false, _settings = {}, _defaultSettings = {}, _entries = [],
     _spkPopupTarget = null,
     _debugOutputEnabled = false,   // 调试文件输出开关
     _selectedExportLang = null,    // 单语言导出当前选中语言
+    _subtitleSearchOpen = false,   // 底部字幕搜索面板开关
     _sciStage = '', _sciText = '', _sciFadeTimer = null, // 处理过程科幻展示层
     _sciAsrSimTimer = null, _sciAsrSimSec = 0,
     _sciAsrQueue = [], _sciAsrQueueTimer = null,
@@ -1102,7 +1145,16 @@ function handleLlmDone(m) {
   if (!m.diarize_running) {
     setPhase(4);
     updateProgress(100, trMsg(m.msg || `完成（${entries.length} 条）`));
-    sciFinishThen(() => showReview(entries));
+    let reviewShown = false;
+    const showOnce = () => {
+      if (reviewShown) return;
+      reviewShown = true;
+      showReview(entries);
+    };
+    sciFinishThen(showOnce);
+    // Safety net: if the sci-fi fade timer is interrupted by late translation
+    // events or pywebview timing, still force the review/playback UI to appear.
+    setTimeout(showOnce, 1500);
   }
 }
 
@@ -1599,15 +1651,195 @@ async function showReview(entries) {
   }
 }
 
+
+// ── Subtitle search / filter ─────────────────────────────────
+function subtitleSearchMode() {
+  return document.getElementById('SUB_SEARCH_MODE')?.value || 'text';
+}
+function subtitleSearchQuery() {
+  const mode = subtitleSearchMode();
+  if (mode === 'speaker') return document.getElementById('SUB_SEARCH_SPEAKER')?.value || '';
+  return document.getElementById('SUB_SEARCH_INPUT')?.value || '';
+}
+function entrySearchBlob(e) {
+  const trans = e && e.translations ? Object.values(e.translations).join('\n') : '';
+  return [e?.corrected, e?.text, e?.asr_raw, trans, e?.language, e?.emotion, e?.speaker]
+    .filter(v => v !== undefined && v !== null).join('\n');
+}
+function regexEscape(s) {
+  return String(s || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+function hasSearchLogicOperators(q) {
+  // Logical operators are recognized only when surrounded by whitespace.
+  // Examples: "同志 AND 主义", "patent OR claim". Case-insensitive.
+  return /\s+(?:AND|OR)\s+/i.test(String(q || ''));
+}
+function splitRegexLogicExpression(q) {
+  // Keeps the original regex mode intact. If no AND/OR operator is present,
+  // the whole query is treated as a normal JavaScript regular expression.
+  q = String(q || '').trim();
+  if (!hasSearchLogicOperators(q)) {
+    const single = new RegExp(q, 'i');
+    const highlight = new RegExp(q, 'gi');
+    return {kind: 'single', single, highlight};
+  }
+
+  const parts = q.split(/\s+(AND|OR)\s+/i).map(x => String(x || '').trim()).filter(x => x !== '');
+  if (!parts.length || parts.length % 2 === 0) throw new Error('Invalid logical regex expression');
+
+  const groups = [[]];
+  const highlightTerms = [];
+  let pendingOp = null;
+  for (let i = 0; i < parts.length; i++) {
+    const part = parts[i];
+    if (i % 2 === 1) {
+      const op = part.toUpperCase();
+      if (op !== 'AND' && op !== 'OR') throw new Error('Invalid logical operator');
+      pendingOp = op;
+      continue;
+    }
+    if (!part) throw new Error('Empty regex term');
+    const termRe = new RegExp(part, 'i');
+    if (pendingOp === 'OR') groups.push([]);
+    groups[groups.length - 1].push(termRe);
+    highlightTerms.push(part);
+  }
+  if (!groups.length || groups.some(g => !g.length)) throw new Error('Invalid logical regex expression');
+
+  let highlight = null;
+  if (highlightTerms.length) {
+    highlight = new RegExp(highlightTerms.map(t => `(?:${t})`).join('|'), 'gi');
+  }
+  return {kind: 'logic', groups, highlight};
+}
+function currentSearchRegexForHighlight() {
+  const q = subtitleSearchQuery().trim();
+  const mode = subtitleSearchMode();
+  if (!q || mode === 'speaker') return null;
+  try {
+    if (mode === 'regex') return splitRegexLogicExpression(q).highlight;
+    return new RegExp(regexEscape(q), 'gi');
+  } catch(e) { return null; }
+}
+function highlightSearchText(text, re) {
+  text = String(text ?? '');
+  if (!re) return esc(text);
+  let out = '', last = 0, m, guard = 0;
+  try {
+    re.lastIndex = 0;
+    while ((m = re.exec(text)) && guard++ < 300) {
+      if (!m[0]) { re.lastIndex++; continue; }
+      out += esc(text.slice(last, m.index));
+      out += `<mark class="search-hit">${esc(m[0])}</mark>`;
+      last = m.index + m[0].length;
+    }
+    out += esc(text.slice(last));
+    return out;
+  } catch(e) { return esc(text); }
+}
+function filterSubtitleEntries(entries) {
+  entries = Array.isArray(entries) ? entries : [];
+  const q = subtitleSearchQuery().trim();
+  const mode = subtitleSearchMode();
+  const err = document.getElementById('SUB_SEARCH_ERR');
+  if (err) err.textContent = '';
+  if (!q) return entries.map((e, idx) => ({e, idx}));
+  if (mode === 'speaker') {
+    const needle = q.toLowerCase();
+    return entries.map((e, idx) => ({e, idx})).filter(x => String(x.e?.speaker || '').toLowerCase() === needle);
+  }
+  if (mode === 'regex') {
+    let parsed;
+    try { parsed = splitRegexLogicExpression(q); }
+    catch(e) {
+      if (err) err.textContent = tr('search.regex_error');
+      return [];
+    }
+    return entries.map((e, idx) => ({e, idx})).filter(x => {
+      const blob = entrySearchBlob(x.e);
+      if (parsed.kind === 'single') return parsed.single.test(blob);
+      // OR of AND-groups: "A AND B OR C" means (A && B) || C.
+      return parsed.groups.some(group => group.every(re => re.test(blob)));
+    });
+  }
+  const needle = q.toLowerCase();
+  return entries.map((e, idx) => ({e, idx})).filter(x => entrySearchBlob(x.e).toLowerCase().includes(needle));
+}
+function updateSubtitleSearchUI(total, shown) {
+  const bar = document.getElementById('SUB_SEARCH_BAR');
+  if (bar) bar.classList.toggle('visible', !!_subtitleSearchOpen && total > 0);
+  const btn = document.getElementById('BTN_SUB_SEARCH');
+  if (btn) {
+    btn.classList.toggle('active', !!_subtitleSearchOpen);
+    const title = tr(_subtitleSearchOpen ? 'search.toggle_title_close' : 'search.toggle_title');
+    btn.title = title;
+    btn.setAttribute('aria-label', title);
+  }
+  updateSubtitleSpeakerOptions();
+  const mode = subtitleSearchMode();
+  const input = document.getElementById('SUB_SEARCH_INPUT');
+  const spSel = document.getElementById('SUB_SEARCH_SPEAKER');
+  if (input) {
+    input.style.display = mode === 'speaker' ? 'none' : '';
+    input.placeholder = tr(mode === 'regex' ? 'search.placeholder_regex' : 'search.placeholder_text');
+  }
+  if (spSel) spSel.style.display = mode === 'speaker' ? '' : 'none';
+  const cnt = document.getElementById('SUB_SEARCH_COUNT');
+  if (cnt) cnt.textContent = total ? tr('search.count').replace('N', shown).replace('M', total) : '';
+}
+function updateSubtitleSpeakerOptions() {
+  const sel = document.getElementById('SUB_SEARCH_SPEAKER');
+  if (!sel) return;
+  const cur = sel.value;
+  const names = [];
+  (_speakerOrder || []).forEach(s => { if (s && !names.includes(s)) names.push(s); });
+  (_entries || []).forEach(e => { const s = e && e.speaker; if (s && !names.includes(s)) names.push(s); });
+  sel.innerHTML = names.length
+    ? names.map(s => `<option value="${esc(s)}">${esc(s)}</option>`).join('')
+    : `<option value="">${esc(tr('search.no_speaker'))}</option>`;
+  if (names.includes(cur)) sel.value = cur;
+}
+function toggleSubtitleSearchPanel() {
+  _subtitleSearchOpen = !_subtitleSearchOpen;
+  updateSubtitleSearchUI((_entries||[]).length, (_entries||[]).length);
+  if (_subtitleSearchOpen) {
+    setTimeout(() => {
+      const mode = subtitleSearchMode();
+      const el = mode === 'speaker' ? document.getElementById('SUB_SEARCH_SPEAKER') : document.getElementById('SUB_SEARCH_INPUT');
+      if (el) el.focus();
+    }, 0);
+  }
+}
+function onSubtitleSearchModeChanged() {
+  updateSubtitleSearchUI((_entries||[]).length, (_entries||[]).length);
+  renderEntries(_entries);
+}
+function onSubtitleSearchChanged() { renderEntries(_entries); }
+function clearSubtitleSearch() {
+  const modeSel = document.getElementById('SUB_SEARCH_MODE');
+  if (modeSel) modeSel.value = 'text';
+  const input = document.getElementById('SUB_SEARCH_INPUT');
+  if (input) input.value = '';
+  const err = document.getElementById('SUB_SEARCH_ERR');
+  if (err) err.textContent = '';
+  renderEntries(_entries);
+}
+
 function renderEntries(entries) {
   entries = Array.isArray(entries) ? entries : [];
   const wrap = document.getElementById('SUB_WRAP');
+  const filtered = filterSubtitleEntries(entries);
+  updateSubtitleSearchUI(entries.length, filtered.length);
   wrap.innerHTML = '';
   if (!entries.length) {
     wrap.innerHTML = `<div style="text-align:center;color:var(--hi);padding:40px">${tr('entry.no_content')}</div>`;
     return;
   }
-  entries.forEach((e, idx) => {
+  if (!filtered.length) {
+    wrap.innerHTML = `<div style="text-align:center;color:var(--hi);padding:40px">${tr('search.no_match')}</div>`;
+    return;
+  }
+  filtered.forEach(({e, idx}) => {
     const el = document.createElement('div');
     el.className = 'entry';
     el.dataset.idx = idx;
@@ -1656,8 +1888,9 @@ function _entryHTML(e, idx) {
   const emo   = e.emotion  || '';
   const spk   = e.speaker  || '';
   const trans = e.translations || {};
+  const searchRe = currentSearchRegexForHighlight();
   const transHtml = Object.entries(trans).map(([l,t]) =>
-    `<div class="trans-line">${langTag(l)}${esc(t)}</div>`
+    `<div class="trans-line">${langTag(l)}${highlightSearchText(t, searchRe)}</div>`
   ).join('');
 
   const _micSvg = '<svg class="svg-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="pointer-events:none;margin-right:2px;flex-shrink:0"><rect x="9" y="2" width="6" height="11" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><line x1="12" y1="21" x2="12" y2="17"/><line x1="8" y1="21" x2="16" y2="21"/></svg>';
@@ -1678,7 +1911,7 @@ function _entryHTML(e, idx) {
   const asrRawHtml = asrRaw
     ? `<div class="asr-raw-layer" id="asr-raw-${idx}">
         <div class="asr-raw-label">${tr('entry.asr_anchor_time')} ${esc(asrTs)} ${!tsMatch?'<span style=\"color:var(--red)\">'+tr('entry.asr_ts_mismatch')+'</span>':''}</div>
-        <div class="asr-raw-text">${esc(asrRaw)}</div>
+        <div class="asr-raw-text">${highlightSearchText(asrRaw, searchRe)}</div>
        </div>` : '';
 
   return `
@@ -1689,7 +1922,7 @@ function _entryHTML(e, idx) {
       ${spkBadge}
       <span class="entry-num">#${idx+1}</span>
     </div>
-    <div class="entry-text" id="entry-text-${idx}">${esc(e.corrected||'')}</div>
+    <div class="entry-text" id="entry-text-${idx}">${highlightSearchText(e.corrected||'', searchRe)}</div>
     ${asrRawHtml}
     ${transHtml ? `<div class="entry-trans">${transHtml}</div>` : ''}
     <div class="entry-actions">
@@ -2103,6 +2336,12 @@ function applyTranslation(entry_id, trans, msg=null) {
   if (_retranslateVisualRunning || _translateAllRunning) _translateAllCompletedIds.add(eidNum);
   if (!_entries[entry_id]) { _updateTranslateProgress(); return; }
   _entries[entry_id].translations = trans || {};
+  // If automatic post-LLM translation arrives before the review cards have
+  // been rendered, do not leave the user stuck in the Phase II preview.
+  const subWrap = document.getElementById('SUB_WRAP');
+  if (!_retranslateVisualRunning && subWrap && !subWrap.classList.contains('visible') && Array.isArray(_entries) && _entries.length) {
+    sciFinishThen(() => showReview(_entries));
+  }
   // During full retranslation, mirror every backend translate_done event into the
   // sci-fi panel. This no longer depends on whether parsed translations are
   // non-empty, so JSON repair/fallback cases still visibly advance.
@@ -2550,6 +2789,7 @@ function updateSpeakerPanel(entries) {
   rememberSpeakerOrderFromEntries(entries, false);
   const speakers = (_speakerOrder || []).filter(spk => Object.prototype.hasOwnProperty.call(counts, spk));
   Object.keys(counts).forEach(spk => { if (!speakers.includes(spk)) speakers.push(spk); });
+  updateSubtitleSpeakerOptions();
   if (!speakers.length) { res.style.display = 'none'; return; }
 
   res.style.display = '';
@@ -2796,7 +3036,7 @@ async function saveSession() {
 
   const payload = {
     app:          'Lancer1911 ASR Offline',
-    version:      '0.5l',
+    version:      '0.6n',
     saved_at:     new Date().toISOString(),
     source_audio: sourceAudio,   // 原始音频文件的元信息
     settings:     _settings || {},

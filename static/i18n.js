@@ -113,6 +113,22 @@ const I18N = {
     'fc.btn_reset':             '重新选择',
 
     /* Export bar */
+
+    /* Subtitle search */
+    'search.label':              '搜索字幕',
+    'search.mode_text':          '关键词',
+    'search.mode_regex':         '正则',
+    'search.mode_speaker':       '发言人',
+    'search.placeholder_text':   '输入关键词…',
+    'search.placeholder_regex':  '正则；可用 AND / OR，例如：同志 AND 主义、专利 OR claim、第\\d+条',
+    'search.clear':              '清除',
+    'search.count':              '显示 N / M 条',
+    'search.no_match':           '没有匹配的字幕卡片',
+    'search.regex_error':        '正则表达式无效',
+    'search.no_speaker':         '无发言人',
+    'search.toggle_title':       '搜索字幕',
+    'search.toggle_title_close': '隐藏搜索',
+
     'export.label':             '导出：',
     'export.mixed':             '混合',
     'export.single':            '单语',
@@ -127,7 +143,7 @@ const I18N = {
     'export.choose_lang_first': '请先选择语言',
 
     /* Debug panel */
-    'dbg.title':                '调试面板 v0.5g',
+    'dbg.title':                '调试面板 v0.6n',
     'dbg.btn_raw':              'ASR 原始文字',
     'dbg.btn_segments':         'ASR Segments',
     'dbg.btn_timestamps':       '时间戳对比',
@@ -359,6 +375,22 @@ const I18N = {
     'fc.btn_reset':             'Choose another',
 
     /* Export bar */
+
+    /* Subtitle search */
+    'search.label':              'Search',
+    'search.mode_text':          'Keyword',
+    'search.mode_regex':         'Regex',
+    'search.mode_speaker':       'Speaker',
+    'search.placeholder_text':   'Enter keyword…',
+    'search.placeholder_regex':  'Regex; AND / OR supported, e.g. patent AND claim, apple OR orange, Article \\d+',
+    'search.clear':              'Clear',
+    'search.count':              'Showing N / M',
+    'search.no_match':           'No matching subtitle cards',
+    'search.regex_error':        'Invalid regular expression',
+    'search.no_speaker':         'No speakers',
+    'search.toggle_title':       'Search subtitles',
+    'search.toggle_title_close': 'Hide search',
+
     'export.label':             'Export:',
     'export.mixed':             'Mixed',
     'export.single':            'Single',
@@ -373,7 +405,7 @@ const I18N = {
     'export.choose_lang_first': 'Please select a language first',
 
     /* Debug panel */
-    'dbg.title':                'Debug Panel v0.5g',
+    'dbg.title':                'Debug Panel v0.6n',
     'dbg.btn_raw':              'ASR Raw Text',
     'dbg.btn_segments':         'ASR Segments',
     'dbg.btn_timestamps':       'Timestamp Diff',

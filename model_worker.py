@@ -1,5 +1,5 @@
 """
-Lancer1911 ASR Offline v0.5a — 模型子进程
+Lancer1911 ASR Offline v0.6n — 模型子进程
 
 架构：Whisper (词级时间戳) → 两阶段 LLM → 字幕条目
 
@@ -205,7 +205,11 @@ def _build_char_time_map(segments: list, raw_text: str,
             return [(0, 0.0), (raw_len, float(total_duration))]
         map_pts.sort(key=lambda x: x[0])
         if map_pts[0][0] > 0:
-            map_pts.insert(0, (0, float(segments[0].get("start", 0.0) or 0.0)))
+            # 字符位置 0 对应音频时间 0.0，而不是第一个 segment 的 start。
+            # segments[0].start 是第一个词在音频中的位置，
+            # 不能用它作为 char_pos=0 的时间锚——那会把所有 0..first_word_char
+            # 的字符全部错误地映射到 segments[0].start，导致前段字幕时间集中跳变。
+            map_pts.insert(0, (0, 0.0))
         if map_pts[-1][0] < raw_len:
             map_pts.append((raw_len, float(total_duration)))
         out = [map_pts[0]]
@@ -221,9 +225,9 @@ def _build_char_time_map(segments: list, raw_text: str,
     if not segments:
         return [(0, 0.0), (raw_len, float(total_duration))]
     if len(segments) == 1:
-        s0 = float(segments[0].get("start", 0.0) or 0.0)
+        # 单段降级：char_pos=0 → 0.0s，char_pos=raw_len → segment end
         e0 = float(segments[0].get("end", total_duration) or total_duration)
-        return [(0, s0), (raw_len, e0)]
+        return [(0, 0.0), (raw_len, e0)]
     map_pts = []
     char_cursor = 0
     for seg in segments:
@@ -741,7 +745,7 @@ def _extract_mfcc_embedding(audio_chunk: np.ndarray, sr: int = 16000,
     # 功率谱
     mag = np.abs(np.fft.rfft(frames, n=n_fft)) ** 2  # [n_frames, n_fft//2+1]
 
-    # Mel 滤波器组
+    # Mel 滤波器组（向量化实现，避免 Python 双重 for 循环）
     n_mels = 40
     fmin, fmax = 0.0, sr / 2.0
     def hz2mel(f): return 2595.0 * np.log10(1.0 + f / 700.0)
@@ -750,17 +754,15 @@ def _extract_mfcc_embedding(audio_chunk: np.ndarray, sr: int = 16000,
     mel_pts = np.linspace(mel_min, mel_max, n_mels + 2)
     hz_pts  = mel2hz(mel_pts)
     bin_pts = np.floor((n_fft + 1) * hz_pts / sr).astype(int)
-    fbank   = np.zeros((n_mels, n_fft // 2 + 1), dtype=np.float32)
-    for m in range(1, n_mels + 1):
-        f_m_minus = bin_pts[m - 1]
-        f_m       = bin_pts[m]
-        f_m_plus  = bin_pts[m + 1]
-        for k in range(f_m_minus, f_m):
-            if f_m != f_m_minus:
-                fbank[m-1, k] = (k - f_m_minus) / (f_m - f_m_minus)
-        for k in range(f_m, f_m_plus):
-            if f_m_plus != f_m:
-                fbank[m-1, k] = (f_m_plus - k) / (f_m_plus - f_m)
+
+    # 向量化构建三角滤波器组：k_idx [1, n_fft//2+1]，对每个 mel 滤波器广播计算斜率
+    k_idx = np.arange(n_fft // 2 + 1, dtype=np.float32)          # [K]
+    f0 = bin_pts[:-2].reshape(-1, 1).astype(np.float32)           # [n_mels, 1] 左端
+    f1 = bin_pts[1:-1].reshape(-1, 1).astype(np.float32)          # [n_mels, 1] 峰值
+    f2 = bin_pts[2:  ].reshape(-1, 1).astype(np.float32)          # [n_mels, 1] 右端
+    rise = np.where(f1 != f0, (k_idx - f0) / np.where(f1 != f0, f1 - f0, 1.0), 0.0)
+    fall = np.where(f2 != f1, (f2 - k_idx) / np.where(f2 != f1, f2 - f1, 1.0), 0.0)
+    fbank = np.clip(np.minimum(rise, fall), 0.0, 1.0).astype(np.float32)  # [n_mels, K]
 
     filter_banks = np.dot(mag, fbank.T)
     filter_banks = np.where(filter_banks == 0, np.finfo(float).eps, filter_banks)
@@ -822,6 +824,9 @@ def _agglomerative_cluster(embeddings: np.ndarray, threshold: float) -> list:
     完全链接（complete linkage）层次聚类。
     threshold: 0~1 之间的余弦距离阈值（越小越严格，越多分组）。
     返回 cluster label 列表（0-based）。
+
+    复杂度优化：预计算全量余弦距离矩阵，合并时用 np.maximum 增量更新簇间距离行，
+    避免每轮重新遍历所有样本对，从 O(n³) 降至 O(n²)。
     """
     n = len(embeddings)
     if n == 0:
@@ -829,51 +834,65 @@ def _agglomerative_cluster(embeddings: np.ndarray, threshold: float) -> list:
     if n == 1:
         return [0]
 
-    # 余弦距离矩阵（1 - cosine_similarity）
+    # 余弦距离矩阵（1 - cosine_similarity），shape [n, n]
     norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
     norms = np.where(norms < 1e-8, 1.0, norms)
     normed = embeddings / norms
-    sim = np.dot(normed, normed.T)          # cosine similarity [-1, 1]
-    dist = np.clip(1.0 - sim, 0.0, 2.0)    # cosine distance  [0, 2]
+    sim  = np.dot(normed, normed.T)
+    dist = np.clip(1.0 - sim, 0.0, 2.0).astype(np.float32)
+    np.fill_diagonal(dist, 0.0)
 
-    # 初始：每个样本自成一簇
-    labels = list(range(n))
+    # 每个簇用一个"代表行"在距离矩阵中维护 complete-linkage 距离。
+    # active[i] = True 表示簇 i 仍存活；cluster_dist[i, j] 是簇 i 与簇 j 的最大样本间距离。
+    # 初始时每个样本是独立簇，cluster_dist 即原始距离矩阵。
+    cluster_dist_mat = dist.copy()           # 当前簇间距离（complete linkage）
+    active  = np.ones(n, dtype=bool)        # 存活标志
+    members = [[i] for i in range(n)]       # 簇成员（用于最终 label 输出）
 
-    def cluster_dist(a_indices, b_indices):
-        """complete linkage: 两簇间最大距离"""
-        max_d = 0.0
-        for i in a_indices:
-            for j in b_indices:
-                if dist[i, j] > max_d:
-                    max_d = dist[i, j]
-        return max_d
+    # 对角线设为 inf，避免在 argmin 时选中自身
+    np.fill_diagonal(cluster_dist_mat, np.inf)
 
-    # 簇集合：{cluster_id: [sample_indices]}
-    clusters = {i: [i] for i in range(n)}
+    while True:
+        active_ids = np.where(active)[0]
+        if len(active_ids) <= 1:
+            break
 
-    while len(clusters) > 1:
-        ids = list(clusters.keys())
-        best_d = float("inf")
-        best_pair = (ids[0], ids[1])
-        for i in range(len(ids)):
-            for j in range(i+1, len(ids)):
-                d = cluster_dist(clusters[ids[i]], clusters[ids[j]])
-                if d < best_d:
-                    best_d = d
-                    best_pair = (ids[i], ids[j])
+        # 在存活簇间找距离最小的一对（O(k²)，k 为当前存活簇数）
+        sub = cluster_dist_mat[np.ix_(active_ids, active_ids)]
+        flat_idx = np.argmin(sub)
+        ri, rj = divmod(int(flat_idx), len(active_ids))
+        best_d = float(sub[ri, rj])
+
         if best_d > threshold:
-            break  # 所有剩余簇之间距离均超过阈值，停止合并
-        a, b = best_pair
-        clusters[a].extend(clusters.pop(b))
+            break   # 所有剩余簇间距离均超过阈值，停止合并
 
-    # 重新编号，按首次出现的样本序号排序（保证 SPEAKER_1 最早出现）
-    sorted_cluster_ids = sorted(clusters.keys(), key=lambda cid: min(clusters[cid]))
-    label_map = {cid: i for i, cid in enumerate(sorted_cluster_ids)}
+        a, b = int(active_ids[ri]), int(active_ids[rj])
+        if a > b:
+            a, b = b, a   # 保证 a < b，始终合并到较小下标
+
+        # Complete linkage 更新：新簇 a 与其余各簇的距离 = max(a 行, b 行)
+        cluster_dist_mat[a, :] = np.maximum(cluster_dist_mat[a, :],
+                                             cluster_dist_mat[b, :])
+        cluster_dist_mat[:, a] = cluster_dist_mat[a, :]
+        cluster_dist_mat[a, a] = np.inf   # 对角线保持 inf
+
+        # 停用簇 b
+        active[b] = False
+        cluster_dist_mat[b, :] = np.inf
+        cluster_dist_mat[:, b] = np.inf
+
+        members[a].extend(members[b])
+        members[b] = []
+
+    # 重新编号，按各簇首个样本序号排序（保证 SPEAKER_1 最早出现）
+    final_clusters = [(min(members[i]), i) for i in range(n) if active[i]]
+    final_clusters.sort()
+    label_map = {cid: label for label, (_, cid) in enumerate(final_clusters)}
 
     result = [0] * n
-    for cid, indices in clusters.items():
-        for idx in indices:
-            result[idx] = label_map[cid]
+    for cid, (_, orig_cid) in enumerate(final_clusters):
+        for idx in members[orig_cid]:
+            result[idx] = cid
     return result
 
 
@@ -925,7 +944,8 @@ def run_diarization(audio_path: str, entries: list,
                 chunk = audio_full[s_idx:e_idx]
             embeddings[i] = embed_fn(chunk, SR)
 
-        # 缓存嵌入
+        # 缓存嵌入（仅保留最新一条，避免多次处理不同文件时无限累积内存）
+        _spk_embed_cache.clear()
         _spk_embed_cache[cache_key] = {
             "embeddings": embeddings.tolist(),
         }
@@ -1026,6 +1046,13 @@ class _AsrStdoutRelay:
 
     def flush(self):
         self._orig.flush()
+
+    def fileno(self):
+        # 委托给真实 stdout，避免底层 C 扩展（如 mlx_whisper）调用时抛 UnsupportedOperation
+        return self._orig.fileno()
+
+    def isatty(self):
+        return False
 
     def _handle_line(self, line: str):
         m = _TS_RE.match(line.strip())
@@ -1392,8 +1419,10 @@ def worker_main(task_q: Queue, result_q: Queue,
                     p1_text = sent["p1_text"]
 
                     # ── 输入长度守卫：超长句直接跳过 LLM，用 P1 原文 ──
-                    if len(p1_text) > 300:
-                        print(f"  [P2 skip] sent {si+1} too long ({len(p1_text)} chars), using p1_text", flush=True)
+                    # 阈值动态跟随 P1 chunk 上限，确保不会把合法的长句误判为异常。
+                    p2_skip_threshold = p1_chunk_max + 50
+                    if len(p1_text) > p2_skip_threshold:
+                        print(f"  [P2 skip] sent {si+1} too long ({len(p1_text)} chars > {p2_skip_threshold}), using p1_text", flush=True)
                         corrected    = p1_text
                         language     = ""
                         translations = {}
