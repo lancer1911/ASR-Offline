@@ -1,5 +1,5 @@
 """
-Lancer1911 ASR Offline v0.7a — FastAPI 后端
+Lancer1911 ASR Offline v0.7b — FastAPI 后端
 四阶段流水线：文件检查 → Whisper ASR → LLM纠错 → 说话人识别 → 手工校对/翻译
 """
 import asyncio, json, os, re, time, hashlib, threading, tempfile, queue as _queue

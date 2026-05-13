@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Lancer1911 ASR Offline v0.7a</title>
+<title>Lancer1911 ASR Offline v0.7b</title>
 <style>
 /* ── CSS Variables ─────────────────────────────────────────── */
 :root{
@@ -475,7 +475,7 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border:none;
         LANCER1911<em>/</em>ASR OFFLINE</a>
     </span>
     <span class="brand-sub">
-      <span style="font-size:10px;color:var(--ac);letter-spacing:.05em">v0.7a</span>
+      <span style="font-size:10px;color:var(--ac);letter-spacing:.05em">v0.7b</span>
       <span id="author-badge" title="" style="display:none;cursor:default;line-height:1">
         <svg width="11" height="13" viewBox="0 0 11 13" fill="none">
           <path d="M5.5 0.5L1 2.5V6C1 9 3 11.5 5.5 12.5C8 11.5 10 9 10 6V2.5L5.5 0.5Z"
@@ -725,7 +725,7 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border:none;
             <circle cx="50" cy="50" r="44" fill="none" stroke="#cc2222" stroke-width="9"/>
             <line x1="18" y1="18" x2="82" y2="82" stroke="#cc2222" stroke-width="9" stroke-linecap="round"/>
           </svg>
-          <span data-i18n="dbg.title">调试面板 v0.7a</span></span>
+          <span data-i18n="dbg.title">调试面板 v0.7b</span></span>
         <span id="DBG_BACKEND" style="color:var(--hi)"></span>
         <button class="act-btn" onclick="showDebugRaw()" data-i18n="dbg.btn_raw">ASR 原始文字</button>
         <button class="act-btn" onclick="showDebugSegments()" data-i18n="dbg.btn_segments">ASR Segments</button>
@@ -849,7 +849,7 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border:none;
   </div>
 </div>
 
-<script src="/static/i18n.js?v=0.7a"></script>
+<script src="/static/i18n.js?v=0.7b"></script>
 <script>
 // ── Constants ─────────────────────────────────────────────────
 const LANGS = ["中文","英文","日文","韩文","法文","德文","西班牙文"];
@@ -3036,7 +3036,7 @@ async function saveSession() {
 
   const payload = {
     app:          'Lancer1911 ASR Offline',
-    version:      '0.7a',
+    version:      '0.7b',
     saved_at:     new Date().toISOString(),
     source_audio: sourceAudio,   // 原始音频文件的元信息
     settings:     _settings || {},

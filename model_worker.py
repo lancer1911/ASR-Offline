@@ -1,5 +1,5 @@
 """
-Lancer1911 ASR Offline v0.7a — 模型子进程
+Lancer1911 ASR Offline v0.7b — 模型子进程
 
 架构：Whisper (词级时间戳) → 两阶段 LLM → 字幕条目
 
@@ -47,7 +47,7 @@ DEFAULT_ADVANCED_PARAMS = {
     "llm_translate_base_tokens": 800,
     "llm_translate_tokens_per_target_lang": 350,
     "llm_translate_max_tokens_cap": 2400,
-    # v0.7a: model compatibility profile. auto/thinking/legacy.
+    # v0.7b: model compatibility profile. auto/thinking/legacy.
     # thinking: Qwen3.6-style thinking models; legacy: Qwen3-30B/14B-style instruct models.
     "llm_model_profile": "auto",
 }
@@ -286,7 +286,7 @@ def _lookup_char_time(map_pts: list, char_pos: int) -> float:
 
 
 
-# ── v0.7a 模型兼容层 ──────────────────────────────────────────
+# ── v0.7b 模型兼容层 ──────────────────────────────────────────
 def _detect_model_profile(model_name: str = "", adv: dict = None) -> str:
     """Return thinking/legacy according to user setting and model name."""
     adv = adv or {}
@@ -303,13 +303,17 @@ def _detect_model_profile(model_name: str = "", adv: dict = None) -> str:
     return "legacy"
 
 
-def _profile_default(adv: dict, key: str, legacy_value, thinking_value=None):
-    """Use profile-specific defaults only when the user has not changed the old built-in value."""
+def _profile_default(adv: dict, key: str, legacy_value=None, thinking_value=None):
+    """
+    Profile-specific default resolver.
+
+    Important design rule: legacy models should follow the mature v0.6n path as much as possible.
+    Therefore, legacy does NOT replace the original DEFAULT_ADVANCED_PARAMS. Only thinking models
+    may receive a thinking-specific override when the user has not manually changed the value.
+    """
     profile = str(adv.get("_effective_model_profile", "legacy"))
     old_default = DEFAULT_ADVANCED_PARAMS.get(key)
     current = adv.get(key, old_default)
-    if profile == "legacy" and current == old_default:
-        return legacy_value
     if profile == "thinking" and thinking_value is not None and current == old_default:
         return thinking_value
     return current
@@ -551,7 +555,7 @@ def _prompt_phase1(chunk_text: str, context_prompt: str = "", context_limit: int
     半句开头/结尾不加标点。不加逗号。不换行。输出连续纯文本。
     """
     domain = f"\n领域背景：{context_prompt[:context_limit]}" if context_prompt.strip() else ""
-    no_think = "\n/no_think" if model_profile == "thinking" else ""
+    no_think = "\n/no_think" if model_profile in ("thinking", "legacy") else ""
     return (
         "<|im_start|>system\n"
         "你是语音识别后处理助手。\n"
@@ -586,7 +590,7 @@ def _prompt_phase2(sentence_text: str, context_prompt: str = "",
       }
     """
     domain = f"\n领域背景：{context_prompt[:context_limit]}" if context_prompt.strip() else ""
-    no_think = "\n/no_think" if model_profile == "thinking" else ""
+    no_think = "\n/no_think" if model_profile in ("thinking", "legacy") else ""
 
     if translate_to:
         lang_list = "、".join(translate_to)
@@ -1474,12 +1478,16 @@ def worker_main(task_q: Queue, result_q: Queue,
 
                 # ─── Phase 1：轻量纠错，不切句 ─────────────────
                 context_limit = _clamp_int(adv.get("llm_context_prompt_max_chars"), 0, 2000, 300)
-                p1_chunk_max = _clamp_int(_profile_default(adv, "llm_phase1_chunk_max_chars", 280, 350), 80, 2000, 350)
-                p1_max_tokens = _clamp_int(_profile_default(adv, "llm_phase1_max_tokens", 900, 1200), 128, 8192, 1200)
-                p1_min_ratio = _clamp_float(_profile_default(adv, "llm_phase1_min_length_ratio", 0.68, 0.5), 0.1, 1.0, 0.5)
-                p2_base_tokens = _clamp_int(_profile_default(adv, "llm_phase2_base_max_tokens", 900, 1200), 128, 8192, 1200)
-                p2_lang_tokens = _clamp_int(_profile_default(adv, "llm_phase2_tokens_per_target_lang", 0, 600), 0, 4096, 600)
-                inline_translate_to = [] if model_profile == "legacy" else (translate_to or [])
+                # Legacy profile intentionally follows the v0.6n parameter path for speed and stability.
+                # Thinking profile keeps the same defaults unless a thinking-specific override is supplied later.
+                p1_chunk_max = _clamp_int(_profile_default(adv, "llm_phase1_chunk_max_chars", None, 350), 80, 2000, 350)
+                p1_max_tokens = _clamp_int(_profile_default(adv, "llm_phase1_max_tokens", None, 1200), 128, 8192, 1200)
+                p1_min_ratio = _clamp_float(_profile_default(adv, "llm_phase1_min_length_ratio", None, 0.5), 0.1, 1.0, 0.5)
+                p2_base_tokens = _clamp_int(_profile_default(adv, "llm_phase2_base_max_tokens", None, 1200), 128, 8192, 1200)
+                p2_lang_tokens = _clamp_int(_profile_default(adv, "llm_phase2_tokens_per_target_lang", None, 600), 0, 4096, 600)
+                # v0.6n behavior: Phase 2 may correct and translate in one call.
+                # Do not disable inline translation for legacy models, otherwise total LLM calls can explode.
+                inline_translate_to = translate_to or []
                 print(f"[LLM] profile={model_profile} p1_chunk={p1_chunk_max} inline_translate={bool(inline_translate_to)}", flush=True)
                 chunks = _split_into_chunks(raw_text, gaps, max_chars=p1_chunk_max)
                 n_chunks = len(chunks)
@@ -1621,7 +1629,7 @@ def worker_main(task_q: Queue, result_q: Queue,
                             translations = parsed_obj.get("translations", {}) or {}
                             if not isinstance(translations, dict):
                                 translations = {}
-                            if not _text_coverage_ok(p1_text, corrected, min_ratio=0.55):
+                            if model_profile == "thinking" and not _text_coverage_ok(p1_text, corrected, min_ratio=0.55):
                                 print(f"  [P2 coverage] sent {si+1} corrected too short, fallback", flush=True)
                                 corrected = p1_text
                                 translations = {}
@@ -1748,7 +1756,7 @@ def worker_main(task_q: Queue, result_q: Queue,
                 trans_lines = "".join(f'    "{l}": "<translation>",\n' for l in translate_to)
                 trans_lines = trans_lines.rstrip(",\n") + "\n"
                 trans_block = f',\n  "translations": {{\n{trans_lines}  }}'
-                no_think = "\n/no_think" if model_profile == "thinking" else ""
+                no_think = "\n/no_think" if model_profile in ("thinking", "legacy") else ""
                 prompt = (
                     "<|im_start|>system\nYou are a multilingual translator.\n"
                     "Rules:\n1. Translate into every target language.\n"

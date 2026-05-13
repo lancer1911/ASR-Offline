@@ -21,7 +21,7 @@ from pathlib import Path
 from setuptools import setup
 
 APP_NAME = "Lancer1911 ASR Offline"
-VERSION = "0.7a"
+VERSION = "0.7b"
 BUNDLE_ID = "com.lancer1911.asroffline"
 
 ROOT = Path(__file__).resolve().parent

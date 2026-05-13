@@ -143,7 +143,7 @@ const I18N = {
     'export.choose_lang_first': '请先选择语言',
 
     /* Debug panel */
-    'dbg.title':                '调试面板 v0.7a',
+    'dbg.title':                '调试面板 v0.7b',
     'dbg.btn_raw':              'ASR 原始文字',
     'dbg.btn_segments':         'ASR Segments',
     'dbg.btn_timestamps':       '时间戳对比',
@@ -405,7 +405,7 @@ const I18N = {
     'export.choose_lang_first': 'Please select a language first',
 
     /* Debug panel */
-    'dbg.title':                'Debug Panel v0.7a',
+    'dbg.title':                'Debug Panel v0.7b',
     'dbg.btn_raw':              'ASR Raw Text',
     'dbg.btn_segments':         'ASR Segments',
     'dbg.btn_timestamps':       'Timestamp Diff',

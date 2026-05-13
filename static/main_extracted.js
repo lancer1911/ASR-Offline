@@ -2166,7 +2166,7 @@ async function saveSession() {
 
   const payload = {
     app:          'Lancer1911 ASR Offline',
-    version:      '0.7a',
+    version:      '0.7b',
     saved_at:     new Date().toISOString(),
     source_audio: sourceAudio,   // 原始音频文件的元信息
     settings:     _settings || {},
