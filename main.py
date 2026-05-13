@@ -1,5 +1,5 @@
 """
-Lancer1911 ASR Offline v0.6n — 主入口
+Lancer1911 ASR Offline v0.7a — 主入口
 """
 import sys, threading, time, urllib.request, queue, os
 

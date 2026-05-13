@@ -1,5 +1,5 @@
 """
-Lancer1911 ASR Offline v0.6n — FastAPI 后端
+Lancer1911 ASR Offline v0.7a — FastAPI 后端
 四阶段流水线：文件检查 → Whisper ASR → LLM纠错 → 说话人识别 → 手工校对/翻译
 """
 import asyncio, json, os, re, time, hashlib, threading, tempfile, queue as _queue
@@ -78,6 +78,7 @@ DEFAULT_SETTINGS = {
         "llm_translate_base_tokens": 800,
         "llm_translate_tokens_per_target_lang": 350,
         "llm_translate_max_tokens_cap": 2400,
+        "llm_model_profile": "auto",
     },
     "advanced_presets": [],
 }

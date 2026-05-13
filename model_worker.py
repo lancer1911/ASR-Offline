@@ -1,5 +1,5 @@
 """
-Lancer1911 ASR Offline v0.6n — 模型子进程
+Lancer1911 ASR Offline v0.7a — 模型子进程
 
 架构：Whisper (词级时间戳) → 两阶段 LLM → 字幕条目
 
@@ -47,6 +47,9 @@ DEFAULT_ADVANCED_PARAMS = {
     "llm_translate_base_tokens": 800,
     "llm_translate_tokens_per_target_lang": 350,
     "llm_translate_max_tokens_cap": 2400,
+    # v0.7a: model compatibility profile. auto/thinking/legacy.
+    # thinking: Qwen3.6-style thinking models; legacy: Qwen3-30B/14B-style instruct models.
+    "llm_model_profile": "auto",
 }
 
 def _adv(task: dict) -> dict:
@@ -282,11 +285,63 @@ def _lookup_char_time(map_pts: list, char_pos: int) -> float:
     return float(t0 + frac * (t1 - t0))
 
 
+
+# ── v0.7a 模型兼容层 ──────────────────────────────────────────
+def _detect_model_profile(model_name: str = "", adv: dict = None) -> str:
+    """Return thinking/legacy according to user setting and model name."""
+    adv = adv or {}
+    explicit = str(adv.get("llm_model_profile", "auto") or "auto").strip().lower()
+    if explicit in {"thinking", "legacy"}:
+        return explicit
+    name = (model_name or "").lower()
+    # Qwen3.6 thinking 系列：需要关闭显式思考输出，并使用 <think></think> 预填充。
+    if "qwen3.6" in name or "thinking" in name:
+        return "thinking"
+    # Qwen3-30B / 14B 等旧模型：不使用 thinking prefill，分段和翻译更保守。
+    if "qwen3-30b" in name or "qwen3-14b" in name or "qwen3-" in name:
+        return "legacy"
+    return "legacy"
+
+
+def _profile_default(adv: dict, key: str, legacy_value, thinking_value=None):
+    """Use profile-specific defaults only when the user has not changed the old built-in value."""
+    profile = str(adv.get("_effective_model_profile", "legacy"))
+    old_default = DEFAULT_ADVANCED_PARAMS.get(key)
+    current = adv.get(key, old_default)
+    if profile == "legacy" and current == old_default:
+        return legacy_value
+    if profile == "thinking" and thinking_value is not None and current == old_default:
+        return thinking_value
+    return current
+
+
+def _assistant_prefill(model_profile: str = "legacy") -> str:
+    """Assistant prefill. Only thinking models should receive an already-closed <think> block."""
+    if model_profile == "thinking":
+        return "<|im_start|>assistant\n<think>\n</think>\n"
+    return "<|im_start|>assistant\n"
+
+
+def _text_coverage_ok(src: str, out: str, min_ratio: float = 0.65) -> bool:
+    """Rough guard against LLM dropping content. Conservative and language-agnostic."""
+    src_clean = re.sub(r"\s+", "", src or "")
+    out_clean = re.sub(r"\s+", "", out or "")
+    if not src_clean:
+        return True
+    if len(out_clean) < max(3, len(src_clean) * min_ratio):
+        return False
+    return True
+
 # ── LLM 输出解析（鲁棒） ─────────────────────────────────────
+def _strip_thinking_blocks(text: str) -> str:
+    """Remove Qwen-style thinking blocks, including an unfinished <think> tail."""
+    return re.sub(r"<think>.*?(?:</think>|$)", "", text or "", flags=re.DOTALL).strip()
+
+
+
 def _clean_llm_json_text(resp: str) -> str:
     """清理 LLM 输出中的 thinking、markdown fence 和常见尾巴。"""
-    raw = (resp or "").strip()
-    raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
+    raw = _strip_thinking_blocks(resp)
     raw = re.sub(r"```(?:json)?\s*", "", raw, flags=re.IGNORECASE).strip()
     raw = raw.rstrip("`").strip()
     return raw
@@ -489,13 +544,14 @@ def _parse_llm_json(resp: str, fallback_text: str, label: str = "") -> list:
 
 
 # ── Phase 1 Prompt：轻量纠错，不切句 ────────────────────────
-def _prompt_phase1(chunk_text: str, context_prompt: str = "", context_limit: int = 300) -> str:
+def _prompt_phase1(chunk_text: str, context_prompt: str = "", context_limit: int = 300, model_profile: str = "legacy") -> str:
     """
     Phase 1：轻量纠错 + 标注句子边界。
     修正同音/近音字，在能确认的句子结束处加句终标点（。？！）。
     半句开头/结尾不加标点。不加逗号。不换行。输出连续纯文本。
     """
     domain = f"\n领域背景：{context_prompt[:context_limit]}" if context_prompt.strip() else ""
+    no_think = "\n/no_think" if model_profile == "thinking" else ""
     return (
         "<|im_start|>system\n"
         "你是语音识别后处理助手。\n"
@@ -511,14 +567,14 @@ def _prompt_phase1(chunk_text: str, context_prompt: str = "", context_limit: int
         f"{domain}"
         "<|im_end|>\n"
         "<|im_start|>user\n"
-        f"{chunk_text}"
-        "\n/no_think<|im_end|>\n"
-        "<|im_start|>assistant\n"
+        f"{chunk_text}{no_think}"
+        "<|im_end|>\n"
+        + _assistant_prefill(model_profile)
     )
 
 
 def _prompt_phase2(sentence_text: str, context_prompt: str = "",
-                   translate_to: list = None, context_limit: int = 300) -> str:
+                   translate_to: list = None, context_limit: int = 300, model_profile: str = "legacy") -> str:
     """
     Phase 2：对单个完整句子进行最终纠错、加标点，并同步翻译到目标语言。
     输入已经是完整句子（由 Phase 1 输出按句终标点切分得到）。
@@ -530,6 +586,7 @@ def _prompt_phase2(sentence_text: str, context_prompt: str = "",
       }
     """
     domain = f"\n领域背景：{context_prompt[:context_limit]}" if context_prompt.strip() else ""
+    no_think = "\n/no_think" if model_profile == "thinking" else ""
 
     if translate_to:
         lang_list = "、".join(translate_to)
@@ -559,9 +616,9 @@ def _prompt_phase2(sentence_text: str, context_prompt: str = "",
         f"{domain}"
         "<|im_end|>\n"
         "<|im_start|>user\n"
-        f"句子：{sentence_text}\n"
-        "/no_think<|im_end|>\n"
-        "<|im_start|>assistant\n"
+        f"句子：{sentence_text}{no_think}\n"
+        "<|im_end|>\n"
+        + _assistant_prefill(model_profile)
     )
 
 
@@ -621,63 +678,165 @@ def _split_into_chunks(raw_text: str, gaps: list,
 # ── Phase 1 输出 → 按句终标点切句 ────────────────────────────
 def _split_corrected_into_sentences(corrected_chunks: list,
                                      map_pts: list,
-                                     total_duration: float) -> list:
+                                     total_duration: float,
+                                     max_sentence_chars: int = 90,
+                                     asr_segments: list = None,
+                                     use_segment_text_fallback: bool = True) -> list:
     """
-    将 Phase 1 纠错后的 chunks 拼接，按句终标点（。！？!?）切分为句子。
-    每个句子附加：
-      - p1_text:   Phase 1 纠错后的句子文字
-      - char_start/char_end: 在 Phase 1 拼接文字中的字符位置
-      - start/end: 对应的音频时间（查 map_pts 插值）
-      - asr_raw:   Phase 1 拼接文字（即已轻量纠错的原始片段）
+    将 Phase 1 纠错后的 chunks 拼接并切分为适合字幕显示的句子。
 
-    注意：Phase 1 输出可能没有句终标点（按设计保留原文结构）。
-    若整个输出没有句终标点，则整段作为一句。
+    优先按句终标点（。！？!?）切分。thinking profile 可在 Phase 1 没有补出句终标点时
+    回退到 Whisper/SenseVoice 原始 segments 分组；legacy profile 默认禁用该文本回退，
+    避免 ASR segment 边界残字直接传播到最终字幕。
     """
-    # 拼接所有 chunk 的纠错文字，记录每个 chunk 在拼接串中的偏移
     full_text = ""
     chunk_offsets = []  # (start_in_full, end_in_full, original_char_start, original_char_end)
     for c in corrected_chunks:
         fs = len(full_text)
-        full_text += c["p1_text"]
+        full_text += c.get("p1_text", "")
         fe = len(full_text)
-        chunk_offsets.append((fs, fe, c["char_start"], c["char_end"]))
+        chunk_offsets.append((fs, fe, c.get("char_start", 0), c.get("char_end", 0)))
 
     def full_pos_to_asr_time(pos: int) -> float:
         """将 full_text 中的字符位置转换为音频时间。"""
-        # 找到该位置属于哪个 chunk，然后线性插值到 ASR 原始字符坐标
+        pos = max(0, min(int(pos), len(full_text)))
         for (fs, fe, asr_s, asr_e) in chunk_offsets:
             if fs <= pos <= fe:
                 frac = (pos - fs) / max(1, fe - fs)
                 asr_char = asr_s + frac * (asr_e - asr_s)
                 return _lookup_char_time(map_pts, int(asr_char))
-        # 超出范围：末尾
-        return float(total_duration)
+        return float(total_duration or 0.0)
 
-    # 按句终标点切分
-    sentence_ends = []
-    for m in re.finditer(r"[。！？!?]", full_text):
-        sentence_ends.append(m.end())
-    if not sentence_ends or sentence_ends[-1] < len(full_text):
-        sentence_ends.append(len(full_text))
-
-    sentences = []
-    prev = 0
-    for end_pos in sentence_ends:
-        seg_text = full_text[prev:end_pos].strip()
-        if not seg_text:
-            prev = end_pos
-            continue
-        ts = full_pos_to_asr_time(prev)
+    def _append_piece(out: list, start_pos: int, end_pos: int):
+        text = full_text[start_pos:end_pos].strip()
+        if len(text) < 2:
+            return
+        ts = full_pos_to_asr_time(start_pos)
         te = full_pos_to_asr_time(end_pos)
-        sentences.append({
-            "p1_text":   seg_text,
-            "asr_raw":   seg_text,
-            "char_start": prev,
+        if te <= ts:
+            te = min(float(total_duration or ts + 0.2), ts + 0.2)
+        out.append({
+            "p1_text":    text,
+            "asr_raw":    text,
+            "char_start": start_pos,
             "char_end":   end_pos,
             "start":      round(ts, 3),
             "end":        round(te, 3),
         })
+
+    def _sentences_from_asr_segments(max_chars: int) -> list:
+        """当 LLM 不补标点时，用原始 ASR segments 合并成字幕句。"""
+        if not isinstance(asr_segments, list) or len(asr_segments) < 2:
+            return []
+        out = []
+        buf = []
+        start_t = None
+        end_t = None
+        cur_len = 0
+
+        def flush():
+            nonlocal buf, start_t, end_t, cur_len
+            text = "".join(buf).strip()
+            if len(text) >= 2 and start_t is not None and end_t is not None:
+                out.append({
+                    "p1_text":    text,
+                    "asr_raw":    text,
+                    "char_start": 0,
+                    "char_end":   0,
+                    "start":      round(float(start_t), 3),
+                    "end":        round(float(end_t), 3),
+                })
+            buf = []
+            start_t = None
+            end_t = None
+            cur_len = 0
+
+        for seg in asr_segments:
+            txt = str(seg.get("text", "")).strip()
+            if not txt:
+                continue
+            s = seg.get("start", None)
+            e = seg.get("end", None)
+            try:
+                s = float(s); e = float(e)
+            except Exception:
+                continue
+
+            # 较长停顿视为自然边界。
+            if buf and start_t is not None and s - float(end_t or s) >= 0.75:
+                flush()
+
+            if not buf:
+                start_t = s
+            buf.append(txt)
+            end_t = e
+            cur_len += len(txt)
+
+            # 到达字幕长度上限，或 ASR segment 自带句末标点时切分。
+            if cur_len >= max_chars or (txt and txt[-1] in "。！？!?；;：:"):
+                flush()
+
+        flush()
+        return out
+
+    # 第一层：按句终标点切分。
+    primary_ends = [m.end() for m in re.finditer(r"[。！？!?]", full_text)]
+
+    # 如果 Phase 1 基本没有补句终标点（例如只有全文末尾一个句号），
+    # 则优先使用 ASR segments 分组。
+    if use_segment_text_fallback and len(primary_ends) <= 1 and len(full_text) > max_sentence_chars * 2:
+        seg_sents = _sentences_from_asr_segments(max_sentence_chars)
+        if len(seg_sents) > 1:
+            print(f"[P1→P2 fallback] weak/no sentence punctuation; grouped {len(seg_sents)} entries from ASR segments", flush=True)
+            return seg_sents
+    elif not use_segment_text_fallback and len(primary_ends) <= 1 and len(full_text) > max_sentence_chars * 2:
+        print("[P1→P2 fallback] weak/no sentence punctuation; legacy profile keeps corrected text and uses safe forced split", flush=True)
+
+    if not primary_ends or primary_ends[-1] < len(full_text):
+        primary_ends.append(len(full_text))
+
+    def _split_long_span(start_pos: int, end_pos: int, out: list):
+        span_len = end_pos - start_pos
+        if span_len <= max_sentence_chars:
+            _append_piece(out, start_pos, end_pos)
+            return
+
+        cur = start_pos
+        while cur < end_pos:
+            hard_end = min(cur + max_sentence_chars, end_pos)
+            cut = hard_end
+            search_start = cur + max(20, max_sentence_chars // 2)
+            for i in range(hard_end, search_start, -1):
+                if full_text[i-1] in "，,、；;：:。！？!?\n":
+                    cut = i
+                    break
+            if cut == hard_end and hard_end < end_pos:
+                window = full_text[cur:hard_end]
+                soft_markers = ["之后", "随后", "然后", "接下来", "此时", "但是", "所以", "因为", "如果", "当时", "的时候", "就", "呢", "啊"]
+                best = -1
+                for marker in soft_markers:
+                    idx = window.rfind(marker)
+                    if idx >= max(24, max_sentence_chars // 2):
+                        best = max(best, idx + len(marker))
+                if best > 0:
+                    cut = cur + best
+            if 0 < end_pos - cut < 16:
+                cut = end_pos
+            if cut <= cur:
+                cut = hard_end
+            _append_piece(out, cur, cut)
+            cur = cut
+
+    sentences = []
+    prev = 0
+    for end_pos in primary_ends:
+        if end_pos <= prev:
+            continue
+        _split_long_span(prev, end_pos, sentences)
         prev = end_pos
+
+    if len(sentences) <= 1 and len(full_text) > max_sentence_chars:
+        print(f"[P1→P2 fallback] only {len(sentences)} sentence from {len(full_text)} chars; forced split enabled", flush=True)
 
     return sentences
 
@@ -1195,7 +1354,7 @@ def worker_main(task_q: Queue, result_q: Queue,
     result_q.put({"type":"status","phase":"warmup","text":"加载 LLM…","ready":False})
     print(f"[worker] 加载 LLM: {llm_repo}", flush=True)
     llm_model, llm_tok = mlx_load(llm_ref)
-    print("[worker] LLM 就绪", flush=True)
+    print(f"[worker] LLM 就绪 | profile={_detect_model_profile(llm_repo, {})}", flush=True)
 
     result_q.put({"type":"status","phase":"ready","text":"就绪","ready":True})
     default_sampler = make_sampler(temp=0.0)
@@ -1211,6 +1370,8 @@ def worker_main(task_q: Queue, result_q: Queue,
         global _debug_output_enabled
         _debug_output_enabled = bool(task.get("debug_output", False))
         adv = _adv(task)
+        model_profile = _detect_model_profile(llm_repo, adv)
+        adv["_effective_model_profile"] = model_profile
         sampler = make_sampler(temp=_clamp_float(adv.get("llm_temperature"), 0.0, 1.5, 0.0))
 
         # ══ ASR ══════════════════════════════════════════════
@@ -1313,11 +1474,13 @@ def worker_main(task_q: Queue, result_q: Queue,
 
                 # ─── Phase 1：轻量纠错，不切句 ─────────────────
                 context_limit = _clamp_int(adv.get("llm_context_prompt_max_chars"), 0, 2000, 300)
-                p1_chunk_max = _clamp_int(adv.get("llm_phase1_chunk_max_chars"), 80, 2000, 350)
-                p1_max_tokens = _clamp_int(adv.get("llm_phase1_max_tokens"), 128, 8192, 1200)
-                p1_min_ratio = _clamp_float(adv.get("llm_phase1_min_length_ratio"), 0.1, 1.0, 0.5)
-                p2_base_tokens = _clamp_int(adv.get("llm_phase2_base_max_tokens"), 128, 8192, 1200)
-                p2_lang_tokens = _clamp_int(adv.get("llm_phase2_tokens_per_target_lang"), 0, 4096, 600)
+                p1_chunk_max = _clamp_int(_profile_default(adv, "llm_phase1_chunk_max_chars", 280, 350), 80, 2000, 350)
+                p1_max_tokens = _clamp_int(_profile_default(adv, "llm_phase1_max_tokens", 900, 1200), 128, 8192, 1200)
+                p1_min_ratio = _clamp_float(_profile_default(adv, "llm_phase1_min_length_ratio", 0.68, 0.5), 0.1, 1.0, 0.5)
+                p2_base_tokens = _clamp_int(_profile_default(adv, "llm_phase2_base_max_tokens", 900, 1200), 128, 8192, 1200)
+                p2_lang_tokens = _clamp_int(_profile_default(adv, "llm_phase2_tokens_per_target_lang", 0, 600), 0, 4096, 600)
+                inline_translate_to = [] if model_profile == "legacy" else (translate_to or [])
+                print(f"[LLM] profile={model_profile} p1_chunk={p1_chunk_max} inline_translate={bool(inline_translate_to)}", flush=True)
                 chunks = _split_into_chunks(raw_text, gaps, max_chars=p1_chunk_max)
                 n_chunks = len(chunks)
                 print(f"[P1] {n_chunks} chunks", flush=True)
@@ -1328,14 +1491,16 @@ def worker_main(task_q: Queue, result_q: Queue,
                     result_q.put({"type":"job_progress","phase":"llm",
                                   "pct": pct,
                                   "msg": f"Phase 1 纠错 {ci+1}/{n_chunks}…"})
-                    prompt = _prompt_phase1(chunk["text"], ctx_prompt, context_limit)
+                    prompt = _prompt_phase1(chunk["text"], ctx_prompt, context_limit, model_profile)
                     resp   = mlx_gen(llm_model, llm_tok, prompt=prompt,
                                      max_tokens=p1_max_tokens, sampler=sampler, verbose=False)
                     # Phase 1 输出纯文本，去掉 thinking 块
-                    p1_text = re.sub(r"<think>.*?</think>", "", resp,
-                                     flags=re.DOTALL).strip()
+                    p1_text = _strip_thinking_blocks(resp)
                     # 若 LLM 擅自加了大量标点或大改，退回原文
-                    if not p1_text or len(p1_text) < len(chunk["text"]) * p1_min_ratio:
+                    if (not p1_text or
+                        len(p1_text) < len(chunk["text"]) * p1_min_ratio or
+                        not _text_coverage_ok(chunk["text"], p1_text, min_ratio=p1_min_ratio)):
+                        print(f"[P1 coverage] chunk {ci+1} fallback to raw chunk", flush=True)
                         p1_text = chunk["text"]
                     print(f"[P1] chunk {ci+1}: {len(chunk['text'])}→{len(p1_text)} chars",
                           flush=True)
@@ -1357,7 +1522,10 @@ def worker_main(task_q: Queue, result_q: Queue,
                 result_q.put({"type":"job_progress","phase":"llm",
                                "pct":76,"msg":"按句重新分段…"})
                 sentences = _split_corrected_into_sentences(
-                    corrected_chunks, map_pts, duration)
+                    corrected_chunks, map_pts, duration,
+                    max_sentence_chars=max(55, min(120, p1_chunk_max // 4)),
+                    asr_segments=segments,
+                    use_segment_text_fallback=(model_profile == "thinking"))
                 print(f"[P1→P2] {len(sentences)} sentences", flush=True)
 
                 # ── 保存 Phase 1 结果（JSON） ─────────────────
@@ -1428,14 +1596,13 @@ def worker_main(task_q: Queue, result_q: Queue,
                         translations = {}
                     else:
                         # 翻译语言列表：过滤掉与原文相同的语言（运行时按 language 字段再次过滤）
-                        prompt = _prompt_phase2(p1_text, ctx_prompt, translate_to or [], context_limit)
+                        prompt = _prompt_phase2(p1_text, ctx_prompt, inline_translate_to, context_limit, model_profile)
                         # 含翻译时输出更长，适当增加 max_tokens
-                        p2_max_tokens = p2_base_tokens + p2_lang_tokens * len(translate_to or [])
+                        p2_max_tokens = p2_base_tokens + p2_lang_tokens * len(inline_translate_to)
                         resp   = mlx_gen(llm_model, llm_tok, prompt=prompt,
                                          max_tokens=p2_max_tokens, sampler=sampler, verbose=False)
                         # 去掉 thinking 块
-                        resp_stripped = re.sub(r"<think>.*?</think>", "", resp,
-                                               flags=re.DOTALL).strip()
+                        resp_stripped = _strip_thinking_blocks(resp)
 
                         # ── 重复幻觉检测：直接回退到 P1 原文 ──────────
                         if _detect_repetition(resp_stripped, window=6, thresh=5):
@@ -1453,6 +1620,10 @@ def worker_main(task_q: Queue, result_q: Queue,
                             language     = parsed_obj.get("language", "") or ""
                             translations = parsed_obj.get("translations", {}) or {}
                             if not isinstance(translations, dict):
+                                translations = {}
+                            if not _text_coverage_ok(p1_text, corrected, min_ratio=0.55):
+                                print(f"  [P2 coverage] sent {si+1} corrected too short, fallback", flush=True)
+                                corrected = p1_text
                                 translations = {}
 
                             # 二次检测：解析后内容异常长或重复
@@ -1476,7 +1647,7 @@ def worker_main(task_q: Queue, result_q: Queue,
                         "asr_ts_end":   sent["end"],
                         "asr_raw":      sent["asr_raw"],
                         "emotion":      "",
-                        "translations": translations if translate_to else {},
+                        "translations": translations if inline_translate_to else {},
                     }
                     entries.append(entry_obj)
                     # Visual-only Phase 2 stream. Includes corrected text and completed translations.
@@ -1577,6 +1748,7 @@ def worker_main(task_q: Queue, result_q: Queue,
                 trans_lines = "".join(f'    "{l}": "<translation>",\n' for l in translate_to)
                 trans_lines = trans_lines.rstrip(",\n") + "\n"
                 trans_block = f',\n  "translations": {{\n{trans_lines}  }}'
+                no_think = "\n/no_think" if model_profile == "thinking" else ""
                 prompt = (
                     "<|im_start|>system\nYou are a multilingual translator.\n"
                     "Rules:\n1. Translate into every target language.\n"
@@ -1585,7 +1757,8 @@ def worker_main(task_q: Queue, result_q: Queue,
                     f'Text ({src_lang}): "{text}"\n\n'
                     "{\n"
                     f'  "language": "{src_lang}"{trans_block}\n'
-                    "}\n/no_think<|im_end|>\n<|im_start|>assistant\n"
+                    f"}}{no_think}\n<|im_end|>\n"
+                    + _assistant_prefill(model_profile)
                 )
                 tr_base = _clamp_int(adv.get("llm_translate_base_tokens"), 128, 8192, 800)
                 tr_per_lang = _clamp_int(adv.get("llm_translate_tokens_per_target_lang"), 0, 4096, 350)
